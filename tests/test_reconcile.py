@@ -77,7 +77,7 @@ def test_clean_export_passes_every_l4_check(tmp_path: Path, manifest: Path) -> N
         "l4_compressed_sha256",
     }
     assert all(c.status == Status.PASS for c in l4.values()), [c.message for c in l4.values()]
-    assert report.verdict == Verdict.SUSPECT and report.ral == 4  # L5 still pending
+    assert report.verdict == Verdict.SUSPECT and report.ral == 4  # no scratch DB here: L5 not run
 
 
 def test_changed_value_is_localised_to_its_chunk(tmp_path: Path, manifest: Path) -> None:

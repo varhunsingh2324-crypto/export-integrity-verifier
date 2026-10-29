@@ -25,3 +25,25 @@ def decide(checks: list[CheckResult]) -> tuple[Verdict, int]:
     if any(c.status != Status.PASS for c in checks) or not set(LAYERS) <= covered:
         return Verdict.SUSPECT, ral(checks)
     return Verdict.VERIFIED, ral(checks)
+
+
+def explain(checks: list[CheckResult], verdict: Verdict) -> list[str]:
+    """Why the verdict is not VERIFIED: the critical failures (CORRUPT), or per layer the checks
+    that did not PASS, i.e. the evidence that is missing (SUSPECT)."""
+    if verdict == Verdict.CORRUPT:
+        return [
+            f"L{c.layer} {c.name} FAIL: {c.message}"
+            for c in checks
+            if c.status == Status.FAIL and c.severity == Severity.CRITICAL
+        ]
+    if verdict != Verdict.SUSPECT:
+        return []
+    reasons: list[str] = []
+    for layer in LAYERS:
+        mine = [c for c in checks if c.layer == layer]
+        if not mine:
+            reasons.append(f"L{layer}: no check ran")
+        reasons += [
+            f"L{layer} {c.name} {c.status}: {c.message}" for c in mine if c.status != Status.PASS
+        ]
+    return reasons

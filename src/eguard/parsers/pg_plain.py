@@ -102,6 +102,7 @@ class PgPlainParser(Consumer):
         self._stmt: list[str] = []
         self._stmt_len = 0
         self._stmt_line = 0
+        self._stmt_cut = False
 
     def add_listener(self, listener: DumpListener) -> None:
         self.listeners.append(listener)
@@ -199,28 +200,30 @@ class PgPlainParser(Consumer):
         if self._stmt_len < MAX_STATEMENT_CHARS:
             self._stmt.append(text)
             self._stmt_len += len(text) + 1
+        else:
+            self._stmt_cut = True
         if text.rstrip().endswith(";"):
-            stmt = "\n".join(self._stmt)
-            self._stmt, self._stmt_len = [], 0
-            self._statement(stmt, self._stmt_line)
+            stmt, cut = "\n".join(self._stmt), self._stmt_cut
+            self._stmt, self._stmt_len, self._stmt_cut = [], 0, False
+            self._statement(stmt, self._stmt_line, cut)
 
     def _comment(self, text: str) -> None:
         for prefix, attr in (("-- Dumped from ", "dumped_from"), ("-- Dumped by ", "dumped_by")):
             if text.startswith(prefix):
                 setattr(self.s, attr, text[len(prefix) :].strip())
 
-    def _statement(self, stmt: str, lineno: int) -> None:
+    def _statement(self, stmt: str, lineno: int, cut: bool = False) -> None:
         head = stmt.lstrip()[:32].upper()
         if head.startswith("COPY "):
             self._copy_header(stmt.strip(), lineno)
         elif head.startswith(("CREATE TABLE ", "CREATE UNLOGGED TABLE ")):
-            self._create_table(stmt, lineno)
+            self._create_table(stmt, lineno, cut)
         elif head.startswith("ALTER TABLE ") and "PRIMARY KEY" in stmt:
             m = PK_RE.match(stmt.strip())
             if m and (table := self.s.tables.get(m.group(1))) is not None:
                 table.primary_key = [unquote(c) for c in split_idents(m.group(2))]
 
-    def _create_table(self, stmt: str, lineno: int) -> None:
+    def _create_table(self, stmt: str, lineno: int, cut: bool) -> None:
         m = CREATE_RE.match(stmt.strip())
         if not m:
             return
@@ -232,6 +235,7 @@ class PgPlainParser(Consumer):
             columns=parse_columns(body),
             line=lineno,
             has_data="PARTITION BY" not in rest[close:].upper(),
+            ddl=None if cut else stmt.strip(),
         )
 
     def _copy_header(self, stmt: str, lineno: int) -> None:

@@ -63,12 +63,14 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–4 (skeleton, incident simulation, streaming core + L1 container,
-> L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened export).
-> `eguard verify` runs L1–L4. L4 needs `--manifest`; without one it is SKIP. A manifest from the
-> hardened export carries snapshot counts and the compressed sha256, so L4 can be fully evidenced;
-> any other manifest leaves those two checks SKIP. L5 is still SKIP, so a healthy export is
-> SUSPECT (exit 1, RAL 4 at best). `make faults` builds F1–F6 (needs the database).
+> Implemented so far: phases 0–5 (skeleton, incident simulation, streaming core + L1 container,
+> L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened export, L5
+> restore drill). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
+> manifest from the hardened export carries snapshot counts and the compressed sha256, so L4 can be
+> fully evidenced; any other manifest leaves those two checks SKIP. L5 needs a scratch database
+> (`SCRATCH_DSN` or `--scratch-dsn`); without one it is SKIP. Only a hardened export with a scratch
+> database can reach VERIFIED (RAL 5). A SUSPECT verdict lists the missing evidence.
+> `make faults` builds F1–F6 (needs the database).
 > `make verify-all`/`dashboard`/`demo` still exit non-zero with "not implemented yet" until their
 > phase lands.
 
@@ -88,10 +90,10 @@ CLI:
 
 ```bash
 eguard export  --table public.transactions --out data/exports/v3.sql.gz  # hardened export + verify
-eguard verify  data/exports/v3.sql.gz --manifest data/manifests/v3.manifest.json   # L1–L4
+eguard verify  data/exports/v3.sql.gz --manifest data/manifests/v3.manifest.json   # L1–L5
 pg_dump … | eguard manifest-build --out m.json   # manifest from any dump stream (stdin)
 eguard manifest-seal m.json --compressed f.gz --snapshot ID --taken-at T --db-count s.t=N
-eguard verify  data/exports/v2.sql.gz --dsn $PG_DSN                       # (planned)
+eguard verify  data/exports/v2.sql.gz --dsn $PG_DSN --seed 7   # + sample vs live table (drift)
 eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz      # size-anomaly forensics
 ```
 
@@ -259,8 +261,8 @@ follow rule 7:
 - 2 if any pipeline stage failed;
 - 3 on a configuration error.
 
-Until L5 exists, a healthy export ends SUSPECT (exit 1), and the script says it is *not* reported
-as fully verified.
+A healthy export is VERIFIED (exit 0) only if verify also ran the L5 drill (`SCRATCH_DSN` set).
+Otherwise it ends SUSPECT (exit 1), and the script says it is *not* reported as fully verified.
 
 L4 gains two checks:
 - `l4_snapshot_counts`: the file's rows against `count(*)` in the snapshot. The manifest is built
@@ -302,6 +304,55 @@ state, 65,000 rows, and F2–F6 are checked against its manifest):
 
 F3 differs from the part-A numbers because the source is now compressed by pigz, so the same
 offset flips a different deflate byte.
+
+### L5 restore drill (phase 5)
+
+The same streaming pass reservoir-samples the raw COPY lines (Algorithm L, one reservoir per COPY
+block). The sample size is `n = ⌈ln(1 − confidence) / ln(1 − p)⌉`, from `policy.yaml` `l5`:
+p = 0.1 % and 95 % give n = 2,995. A table with fewer rows is restored in full. The seed is random
+unless you pass `--seed`, and it is recorded in `l5_sample`, so any run can be repeated. A fixed
+default would let a crafted dump keep its bad rows outside a predictable sample.
+
+On `SCRATCH_DSN`, inside one transaction:
+1. `CREATE SCHEMA eguard_l5_<epoch>_<hex>`, then the dump's own `CREATE TABLE`, with only its name
+   changed. A statement that isn't a single plain statement (a second `;`, dollar quoting) is
+   refused, not run.
+2. `COPY … FROM STDIN` with the sampled lines, the same path a real restore takes. If it fails, every
+   row is retried in its own savepoint, so each rejected line is named with PostgreSQL's error.
+   Then the dump's PRIMARY KEY is added.
+3. Round trip: the table is copied back out in load order (`ORDER BY ctid`), and each row's hash is
+   compared with its dump line. pg_dump writes canonical text, so a byte difference means
+   PostgreSQL stored something other than what the line says (for example `40.005` stored as
+   `40.01` in `numeric(12,2)`). This needs no source database.
+4. With `--dsn`, the sampled rows are compared, read-only, with the live table by primary key. The
+   PK and its types come from the live catalog. The export snapshot no longer exists, so a
+   difference is **drift** (changed or deleted since the export): a WARN, so SUSPECT, never
+   CORRUPT. Rows that failed restore or the round trip are left out of this comparison.
+5. `finally`: rollback, `DROP SCHEMA … CASCADE`, then a check that the schema has left
+   `pg_namespace`. Leftover `eguard_l5_*` schemas older than `l5.stale_scratch_seconds` (1 h) are
+   dropped at startup.
+
+Session settings follow pg_dump's (`DateStyle ISO`, `extra_float_digits 3`, …), with `TimeZone`
+from `l5.timezone` (UTC). Limitation: a dump taken in a session with another time zone prints
+timestamptz with a different offset, so the round trip flags it.
+
+Measured on the 390,000-row exports (`SCRATCH_DSN` from `.env`):
+
+| file | L5 | verdict (exit) | wall, peak RSS |
+|---|---|---|---|
+| v3 (hardened) + manifest | 2,995 rows restored, scratch space 1,277,952 bytes (1.2 MiB), drill 0.05 s; round trip identical; schema dropped | **VERIFIED (0), RAL 5** | 6.56 s, 97.2 MiB |
+| v3 + manifest + `--dsn $PG_DSN` | as above, plus `l5_source`: 2,995 rows identical to the live table | VERIFIED (0), RAL 5 | – |
+| v2 (legacy, no manifest) | all PASS | SUSPECT (1), RAL 4; missing evidence: *L4 l4_manifest SKIP: no manifest: nothing records what the exporter emitted …* | 6.73 s, 97.6 MiB |
+
+Fault gallery with L5 (seed 5, `--manifest` for F2–F6). L5 adds evidence but doesn't change any
+verdict:
+- source `v2_hardened.sql.gz`: VERIFIED (0), RAL 5.
+- F3: `l5_restore` FAIL. 1,654 sampled rows were rejected by COPY, the first on line 20,921 with
+  *extra data after last expected column*.
+- F6: `l5_restore` FAIL. The sample held both copies of a duplicated row, so the PRIMARY KEY could
+  not be created.
+- F1, F2, F4, F5: the sampled rows restore and round-trip cleanly. F4/F5 change a single row,
+  which a 2,995-row sample rarely includes; L4 is what catches them.
 
 ## Documentation
 

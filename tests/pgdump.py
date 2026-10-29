@@ -100,12 +100,16 @@ TRICKY = ["tab\\there", "line\\nbreak", "back\\\\slash", "café ☃", "cr\\rlf"]
 
 def row(i: int, rng: random.Random) -> str:
     remarks = "\\N" if i % 7 == 0 else (TRICKY[i % len(TRICKY)] if i % 5 == 0 else f"{i:x}" * 3)
-    meta = "\\N" if i % 11 == 0 else f'{{"v": 1, "risk": {i % 100}, "note": "q\\\\"x"}}'
-    ts = f"2023-{1 + i % 12:02d}-{1 + i % 28:02d} {i % 24:02d}:{i % 60:02d}:{i % 60:02d}.{i:06d}"
+    # Canonical output text, as PostgreSQL itself prints it (the L5 round trip compares bytes):
+    # jsonb keys ordered by length then bytes, no trailing zeros in fractional seconds.
+    meta = "\\N" if i % 11 == 0 else f'{{"v": 1, "note": "q\\\\"x", "risk": {i % 100}}}'
+    frac = f"{i % 1_000_000:06d}".rstrip("0")
+    ts = f"2023-{1 + i % 12:02d}-{1 + i % 28:02d} {i % 24:02d}:{i % 60:02d}:{i % 60:02d}"
+    ts += f".{frac}" if frac else ""
     fields = [
         str(i),
         str(rng.randrange(1, 200_000)),
-        ts[:26] + "+00",
+        ts + "+00",
         f"{rng.randrange(0, 500_000) / 100:.2f}",
         rng.choice(["USD", "EUR", "GBP"]),
         rng.choice(["settled", "pending"]),

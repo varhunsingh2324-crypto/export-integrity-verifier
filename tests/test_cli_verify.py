@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from eguard.cli import app
@@ -8,7 +10,8 @@ from eguard.models import VerifyReport
 from tests import pgdump
 from tests.gzutil import member
 
-runner = CliRunner()
+# Hermetic: the Makefile exports SCRATCH_DSN from .env; these tests do not use a database.
+runner = CliRunner(env={"SCRATCH_DSN": ""})
 DATA = pgdump.dump_bytes(500)
 
 
@@ -65,7 +68,7 @@ def test_verify_with_manifest_reaches_ral_4(tmp_path: Path) -> None:
     seal += ["--taken-at", "2026-10-29 10:00:00+00", "--db-count", "public.transactions=500"]
     assert runner.invoke(app, seal, env=env).exit_code == 0
     result = runner.invoke(app, ["verify", "--manifest", str(m), path], env=env)
-    assert result.exit_code == 1, result.stdout  # SUSPECT only because L5 is pending
+    assert result.exit_code == 1, result.stdout  # SUSPECT only because L5 has no scratch DB
     assert "RAL 4" in result.stdout and "l4_fingerprint" in result.stdout
 
 
@@ -92,3 +95,29 @@ def test_verify_manifest_without_key_is_tool_error(tmp_path: Path) -> None:
     )
     assert result.exit_code == 3
     assert "MANIFEST_HMAC_KEY" in json.loads(result.stdout)["error"]
+
+
+@pytest.mark.db
+def test_verify_cli_with_scratch_reaches_ral_5(tmp_path: Path) -> None:
+    scratch = os.environ.get("SCRATCH_DSN")
+    if not scratch:
+        pytest.skip("SCRATCH_DSN not set (copy .env.example to .env and run `make up`)")
+    env = {"MANIFEST_HMAC_KEY": "k1"}
+    m = _signed_manifest(tmp_path, "k1")
+    path = str(_file(tmp_path, member(DATA)))
+    seal = ["manifest-seal", str(m), "--compressed", path, "--snapshot", "00000003-00000001-1"]
+    seal += ["--taken-at", "2026-10-29 10:00:00+00", "--db-count", "public.transactions=500"]
+    assert runner.invoke(app, seal, env=env).exit_code == 0
+    args = ["verify", "--manifest", str(m), "--scratch-dsn", scratch, "--seed", "3", path]
+    result = runner.invoke(app, args, env=env)
+    assert result.exit_code == 0, result.stdout
+    assert "VERIFIED" in result.stdout and "RAL 5" in result.stdout
+    assert "confidence:" in result.stdout and "All 500 rows" in result.stdout
+
+
+def test_verify_without_manifest_explains_missing_evidence(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["verify", str(_file(tmp_path, member(DATA)))])
+    assert result.exit_code == 1
+    assert "missing evidence:" in result.stdout
+    assert "L4 l4_manifest SKIP: no manifest" in result.stdout
+    assert "L5 l5_restore SKIP: no scratch database" in result.stdout

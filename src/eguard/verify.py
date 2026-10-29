@@ -1,23 +1,21 @@
 """`eguard verify`: one streaming pass over the export; every layer subscribes to that stream."""
 
+import secrets
 from pathlib import Path
 from typing import Any
 
 from eguard.container import check_container
 from eguard.fingerprint import Fingerprinter, StreamDigest
+from eguard.l5 import l5_checks
 from eguard.manifest import ManifestError, check_compatible, file_sha256, load
-from eguard.models import CheckResult, Manifest, Severity, Status, StreamEnd, VerifyReport
+from eguard.models import CheckResult, Manifest, Status, StreamEnd, VerifyReport
 from eguard.parsers.pg_plain import PgPlainParser
 from eguard.reconcile import check_reconcile, check_signature, no_manifest, untrusted
 from eguard.rows import RowValidator, check_rows
+from eguard.sampler import ReservoirSampler, sample_size
 from eguard.stream import Consumer, FanOut, open_decoder
 from eguard.structure import check_structure
-from eguard.verdict import decide
-
-# Layers not built yet are reported as SKIP, so the verdict can never exceed SUSPECT without them.
-PENDING_LAYERS = {
-    5: ("restore drill", 5),
-}
+from eguard.verdict import decide, explain
 
 
 class StreamStats(Consumer):
@@ -31,20 +29,6 @@ class StreamStats(Consumer):
 
     def on_end(self, end: StreamEnd) -> None:
         self.end = end
-
-
-def _pending_checks() -> list[CheckResult]:
-    return [
-        CheckResult(
-            layer=layer,
-            name=f"l{layer}_pending",
-            status=Status.SKIP,
-            severity=Severity.INFO,
-            evidence={"phase": phase},
-            message=f"L{layer} {what} not implemented yet (phase {phase})",
-        )
-        for layer, (what, phase) in PENDING_LAYERS.items()
-    ]
 
 
 def _trusted_manifest(
@@ -70,7 +54,13 @@ def verify_file(
     policy: dict[str, Any],
     manifest: Path | None = None,
     key: bytes | None = None,
+    *,
+    scratch_dsn: str | None = None,
+    source_dsn: str | None = None,
+    seed: int | None = None,
 ) -> VerifyReport:
+    """`seed` None draws a fresh one (recorded in l5_sample): a fixed default would let a crafted
+    dump keep its bad rows out of a predictable sample."""
     trusted, l4 = _trusted_manifest(manifest, key)
     decoder = open_decoder(path, policy["stream"]["chunk_bytes"])
     fan = FanOut(policy["stream"]["max_line_bytes"])
@@ -78,6 +68,10 @@ def verify_file(
     parser = PgPlainParser()
     rows = RowValidator(policy)
     parser.add_listener(rows)
+    l5 = policy["l5"]
+    n = sample_size(l5["detect_fraction"], l5["confidence"])
+    sampler = ReservoirSampler(n, secrets.randbelow(1 << 32) if seed is None else seed)
+    parser.add_listener(sampler)
     if trusted is not None:  # fingerprints cost a hash per row: only when there is a reference
         fp, digest = Fingerprinter(trusted.chunk_rows), StreamDigest()
         parser.add_listener(fp)
@@ -97,6 +91,8 @@ def verify_file(
         max_examples = policy["l3"]["max_error_examples"]
         l4 += check_reconcile(trusted, fp.tables, digest.info, max_examples, file_digest)
     checks += l4
-    checks += _pending_checks()
+    checks += l5_checks(sampler, policy, scratch_dsn, source_dsn)
     verdict, level = decide(checks)
-    return VerifyReport(path=str(path), verdict=verdict, ral=level, checks=checks)
+    return VerifyReport(
+        path=str(path), verdict=verdict, ral=level, checks=checks, reasons=explain(checks, verdict)
+    )

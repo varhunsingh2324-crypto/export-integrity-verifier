@@ -24,6 +24,10 @@ l4:
 l5:
   detect_fraction: 0.001     # p: damaged-row fraction the drill must catch
   confidence: 0.95           # 1 - alpha
+  stale_scratch_seconds: 3600  # leftover eguard_l5_* scratch schemas older than this are dropped
+  timezone: UTC              # drill session TimeZone: timestamptz text depends on it (round trip)
+  statement_timeout_ms: 30000
+  max_examples: 20           # rejected / mismatched / drift rows kept as evidence
 
 exit_codes:
   VERIFIED: 0

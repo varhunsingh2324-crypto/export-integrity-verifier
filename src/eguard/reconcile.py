@@ -50,8 +50,9 @@ def no_manifest() -> CheckResult:
         status=Status.SKIP,
         severity=Severity.INFO,
         evidence={},
-        message="no manifest given: L4 cannot reconcile (pass --manifest; forensic mode against "
-        "source counts comes with the hardened export)",
+        message="no manifest: nothing records what the exporter emitted, so completeness (exporter "
+        "row counts, snapshot count(*)) and content (row fingerprints) are unproven; export with "
+        "`eguard export` (signed manifest) and pass --manifest",
     )
 
 

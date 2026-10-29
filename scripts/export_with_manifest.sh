@@ -171,7 +171,7 @@ V=$?
 set -e
 case "$V" in
     0) echo "export_with_manifest: $OUT VERIFIED (exit 0)" >&2 ;;
-    1) echo "export_with_manifest: $OUT exported; verdict SUSPECT (exit 1). Expected until L5 (restore drill) exists — NOT reported as fully verified." >&2 ;;
+    1) echo "export_with_manifest: $OUT exported; verdict SUSPECT (exit 1): evidence missing (listed above, e.g. no SCRATCH_DSN for the L5 restore drill) — NOT reported as fully verified." >&2 ;;
     *)
         echo "export_with_manifest: verify exited $V — quarantining" >&2
         quarantine

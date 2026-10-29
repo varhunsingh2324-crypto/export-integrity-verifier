@@ -107,6 +107,7 @@ class VerifyReport(BaseModel):
     verdict: Verdict
     ral: int = Field(ge=0, le=5)
     checks: list[CheckResult]
+    reasons: list[str] = Field(default_factory=list)  # why not VERIFIED (verdict.explain)
 
 
 class StreamEnd(BaseModel):
@@ -132,6 +133,7 @@ class TableDef(BaseModel):
     line: int
     has_data: bool = True  # False for a partitioned parent (its rows live in the partitions)
     primary_key: list[str] | None = None  # declared post-data by ALTER TABLE ... PRIMARY KEY
+    ddl: str | None = None  # the CREATE TABLE statement as written; None if it was cut (too long)
 
 
 class CopyBlock(BaseModel):
@@ -239,3 +241,50 @@ class Manifest(BaseModel):
     snapshot: SnapshotInfo | None = None
     compressed: CompressedInfo | None = None
     signature: str | None = None  # hex HMAC-SHA256 over the canonical JSON of all other fields
+
+
+class DrillTable(BaseModel):
+    """One sampled COPY block restored into the scratch schema (L5)."""
+
+    table: str  # as named in the dump
+    scratch_table: str
+    seen: int  # rows of the block in the stream
+    sampled: int
+    # ok, empty, no_ddl (no CREATE TABLE in the dump), ddl_refused (not a single plain
+    # statement, never executed), ddl_error (PostgreSQL rejected it in isolation)
+    status: str = "ok"
+    detail: str | None = None
+    restored: int = 0
+    rejected_count: int = 0
+    rejected: list[dict[str, Any]] = Field(default_factory=list)  # first few: line, error
+    pk_error: str | None = None
+    round_tripped: int = 0
+    mismatched_count: int = 0
+    mismatched: list[dict[str, Any]] = Field(default_factory=list)  # first few: line, columns
+    scratch_bytes: int = 0
+    # Dump lines of the rows that restored and came back byte-identical (for the source check).
+    clean_lines: list[int] = Field(default_factory=list, exclude=True)
+
+
+class DrillResult(BaseModel):
+    schema_name: str
+    tables: list[DrillTable] = Field(default_factory=list)
+    stale_dropped: list[str] = Field(default_factory=list)
+    scratch_bytes: int = 0
+    dropped: bool = False  # confirmed absent from pg_namespace after the drop
+    seconds: float = 0.0
+
+
+class SourceTable(BaseModel):
+    """Sampled rows vs the live source table, by primary key (L5 --dsn)."""
+
+    table: str
+    status: str = "ok"  # ok, no_table, no_pk, error
+    detail: str | None = None
+    primary_key: list[str] = Field(default_factory=list)
+    compared: int = 0
+    matched: int = 0
+    drift_changed: int = 0
+    drift_deleted: int = 0
+    excluded: int = 0  # sampled rows not compared: they failed restore or the round trip
+    examples: list[dict[str, Any]] = Field(default_factory=list)

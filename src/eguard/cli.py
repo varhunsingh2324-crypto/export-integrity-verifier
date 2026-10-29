@@ -98,8 +98,16 @@ def _print_report(report: VerifyReport) -> None:
         style = STATUS_STYLE[c.status]
         table.add_row(f"L{c.layer}", c.name, f"[{style}]{c.status}[/]", c.message)
     console.print(table)
+    for c in report.checks:
+        for statement in c.evidence.get("confidence_statements", []):
+            console.print(f"[bold]confidence:[/] {statement}")
     style = VERDICT_STYLE.get(report.verdict, "red")
     console.print(f"verdict: [bold {style}]{report.verdict}[/] (RAL {report.ral})")
+    if report.reasons:
+        why = "missing evidence" if report.verdict == Verdict.SUSPECT else "failed"
+        console.print(f"{why}:")
+        for reason in report.reasons:
+            console.print(f"  - {reason}", markup=False)
 
 
 def _tool_error(path: str, exc: Exception, as_json: bool) -> typer.Exit:
@@ -117,6 +125,17 @@ def verify(
         Path | None,
         typer.Option(help="Signed manifest from export time; enables L4 (key: MANIFEST_HMAC_KEY)."),
     ] = None,
+    scratch_dsn: Annotated[
+        str | None,
+        typer.Option(envvar="SCRATCH_DSN", help="Database for the L5 sampled restore drill."),
+    ] = None,
+    dsn: Annotated[
+        str | None,
+        typer.Option(help="Live source database: compare the sample by PK (differences = drift)."),
+    ] = None,
+    seed: Annotated[
+        int | None, typer.Option(help="L5 sample seed (default: random, recorded in the report).")
+    ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
 ) -> None:
     """Verify an export in one streaming pass. Exit: 0 VERIFIED, 1 SUSPECT, 2 CORRUPT, 3 error."""
@@ -126,7 +145,15 @@ def verify(
 
     try:
         key = hmac_key_from_env() if manifest is not None else None
-        report = verify_file(path, load_policy(), manifest, key)
+        report = verify_file(
+            path,
+            load_policy(),
+            manifest,
+            key,
+            scratch_dsn=scratch_dsn or None,
+            source_dsn=dsn or None,
+            seed=seed,
+        )
     except (OSError, LineTooLong, ManifestError) as exc:
         raise _tool_error(str(path), exc, as_json) from exc
     if as_json:

@@ -56,6 +56,20 @@ def export(tmp_path: Path, table: str, **env: str) -> subprocess.CompletedProces
     )
 
 
+def scratch_dsn() -> str:
+    dsn = os.environ.get("SCRATCH_DSN")
+    if not dsn:
+        pytest.skip("SCRATCH_DSN not set (copy .env.example to .env and run `make up`)")
+    return dsn
+
+
+def test_without_scratch_db_is_suspect_and_says_so(tmp_path: Path, table: str) -> None:
+    proc = export(tmp_path, table, SCRATCH_DSN="")
+    assert proc.returncode == 1, proc.stderr  # the script never claims more than verify proved
+    assert "SUSPECT (exit 1)" in proc.stderr and "NOT reported as fully verified" in proc.stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["e.manifest.json", "e.sql.gz"]
+
+
 def _sealed(tmp_path: Path) -> Manifest:
     m = load(tmp_path / "e.manifest.json")
     assert isinstance(m, Manifest) and signature_ok(m, KEY.encode())
@@ -64,10 +78,9 @@ def _sealed(tmp_path: Path) -> Manifest:
 
 def test_normal_run_counts_match_and_verify_passes_l4(tmp_path: Path, table: str) -> None:
     rows = count_rows(*table.split("."))
-    proc = export(tmp_path, table)
-    # SUSPECT (1) is expected until L5 exists, and the script says so instead of claiming success.
-    assert proc.returncode == 1, proc.stderr
-    assert "SUSPECT (exit 1)" in proc.stderr and "NOT reported as fully verified" in proc.stderr
+    proc = export(tmp_path, table, SCRATCH_DSN=scratch_dsn())
+    assert proc.returncode == 0, proc.stderr  # L1-L4 plus the L5 restore drill: VERIFIED
+    assert "VERIFIED (exit 0)" in proc.stderr
     assert sorted(p.name for p in tmp_path.iterdir()) == ["e.manifest.json", "e.sql.gz"]
     m = _sealed(tmp_path)
     assert m.snapshot is not None and m.snapshot.counts == {table: rows}
@@ -156,9 +169,9 @@ def test_concurrent_inserts_snapshot_counts_still_exact(tmp_path: Path, table: s
     writer = threading.Thread(target=_insert_for, args=(table, 6))
     writer.start()
     time.sleep(0.5)
-    proc = export(tmp_path, table)
+    proc = export(tmp_path, table, SCRATCH_DSN=scratch_dsn())
     writer.join()
-    assert proc.returncode == 1, proc.stderr
+    assert proc.returncode == 0, proc.stderr
     m = _sealed(tmp_path)
     assert m.snapshot is not None
     in_snapshot = m.snapshot.counts[table]

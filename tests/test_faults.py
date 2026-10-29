@@ -34,6 +34,7 @@ POLICY = load_policy()
 CFG = load_faults_config()
 V2_ROWS = 20_500  # enough for the configured F6 (rows 10001-20000)
 KEY = b"fault-gallery-key"
+SEED = 5  # L5 sample seed: evidence records it, so runs compared with each other share it
 # The configured F5 row (33,333) is beyond this small synthetic dump; same column and delta.
 F5 = F5Config(row=13_579, column=CFG.f5.column, delta=CFG.f5.delta)
 HAVE_COMPRESS = shutil.which("compress") is not None
@@ -98,7 +99,7 @@ def _manifest_for(fid: str, manifest: Path) -> tuple[Path | None, bytes | None]:
 @pytest.fixture(scope="module")
 def reports(gallery: dict[str, Path], source_manifest: Path) -> dict[str, VerifyReport]:
     return {
-        fid: verify_file(p, POLICY, *_manifest_for(fid, source_manifest))
+        fid: verify_file(p, POLICY, *_manifest_for(fid, source_manifest), seed=SEED)
         for fid, p in gallery.items()
     }
 
@@ -136,7 +137,7 @@ def _failing_layers(report: VerifyReport) -> set[int]:
 
 def test_f0_has_no_l1_l4_findings(reports: dict[str, VerifyReport]) -> None:
     f0 = reports["F0"]
-    assert f0.verdict == Verdict.SUSPECT and f0.ral == 4  # L5 not built yet
+    assert f0.verdict == Verdict.SUSPECT and f0.ral == 4  # no scratch DB here: L5 not run
     assert all(c.status == Status.PASS for c in f0.checks if c.layer <= 4)
 
 
@@ -285,7 +286,7 @@ def test_verdicts_ignore_file_names(
     changes nothing."""
     for fid, path in gallery.items():
         manifest, key = _manifest_for(fid, _decoy(tmp_path, source_manifest))
-        report = verify_file(_decoy(tmp_path, path), POLICY, manifest, key)
+        report = verify_file(_decoy(tmp_path, path), POLICY, manifest, key, seed=SEED)
         assert _signature(report) == _signature(reports[fid]), fid
 
 
@@ -314,3 +315,18 @@ def test_f1_real_timeout_in_legacy_pipe(tmp_path: Path) -> None:
     assert (
         f"inside COPY {schema}.{cfg.table} after row {rec['complete_rows_written']:,}" in c.message
     )
+
+
+@pytest.mark.db
+def test_f0_with_manifest_and_restore_drill_is_verified(
+    gallery: dict[str, Path], source_manifest: Path
+) -> None:
+    scratch = os.environ.get("SCRATCH_DSN")
+    if not scratch:
+        pytest.skip("SCRATCH_DSN not set (copy .env.example to .env and run `make up`)")
+    report = verify_file(
+        gallery["F0"], POLICY, source_manifest, KEY, scratch_dsn=scratch, seed=SEED
+    )
+    assert report.verdict == Verdict.VERIFIED and report.ral == 5, report.reasons
+    trip = next(c for c in report.checks if c.name == "l5_round_trip")
+    assert "with 95% probability (2,995 of 20,500 rows" in trip.message
