@@ -5,7 +5,7 @@ from typing import Any
 
 from eguard.container import check_container
 from eguard.fingerprint import Fingerprinter, StreamDigest
-from eguard.manifest import ManifestError, check_compatible, load
+from eguard.manifest import ManifestError, check_compatible, file_sha256, load
 from eguard.models import CheckResult, Manifest, Severity, Status, StreamEnd, VerifyReport
 from eguard.parsers.pg_plain import PgPlainParser
 from eguard.reconcile import check_reconcile, check_signature, no_manifest, untrusted
@@ -90,7 +90,12 @@ def verify_file(
     checks += check_rows(rows)
     if trusted is not None:
         assert digest.info is not None
-        l4 += check_reconcile(trusted, fp.tables, digest.info, policy["l3"]["max_error_examples"])
+        # A second read of the compressed bytes (no second decompression), only if recorded.
+        file_digest = (
+            file_sha256(path, policy["stream"]["chunk_bytes"]) if trusted.compressed else None
+        )
+        max_examples = policy["l3"]["max_error_examples"]
+        l4 += check_reconcile(trusted, fp.tables, digest.info, max_examples, file_digest)
     checks += l4
     checks += _pending_checks()
     verdict, level = decide(checks)

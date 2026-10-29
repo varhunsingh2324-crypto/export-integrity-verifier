@@ -61,6 +61,9 @@ def test_verify_with_manifest_reaches_ral_4(tmp_path: Path) -> None:
     env = {"MANIFEST_HMAC_KEY": "k1"}
     m = _signed_manifest(tmp_path, "k1")
     path = str(_file(tmp_path, member(DATA)))
+    seal = ["manifest-seal", str(m), "--compressed", path, "--snapshot", "00000003-00000001-1"]
+    seal += ["--taken-at", "2026-10-29 10:00:00+00", "--db-count", "public.transactions=500"]
+    assert runner.invoke(app, seal, env=env).exit_code == 0
     result = runner.invoke(app, ["verify", "--manifest", str(m), path], env=env)
     assert result.exit_code == 1, result.stdout  # SUSPECT only because L5 is pending
     assert "RAL 4" in result.stdout and "l4_fingerprint" in result.stdout

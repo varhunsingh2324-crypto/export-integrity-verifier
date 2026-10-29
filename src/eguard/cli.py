@@ -173,3 +173,72 @@ def manifest_build(
     if not m.dump_complete:
         err.print("[red]dump incomplete:[/] no completion marker or an unclosed COPY block")
         raise typer.Exit(1)
+
+
+def _db_counts(pairs: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for pair in pairs:
+        table, sep, n = pair.rpartition("=")
+        if not sep or not table or not n.isdigit():
+            raise ValueError(f"--db-count wants schema.table=N, got {pair!r}")
+        counts[table] = int(n)
+    return counts
+
+
+@app.command("manifest-seal")
+def manifest_seal(
+    manifest: Annotated[Path, typer.Argument(help="Manifest written by manifest-build.")],
+    compressed: Annotated[Path, typer.Option(help="The finished compressed export.")],
+    snapshot: Annotated[str, typer.Option(help="pg_export_snapshot() id pg_dump ran in.")],
+    taken_at: Annotated[str, typer.Option(help="now() of the snapshot transaction.")],
+    db_count: Annotated[
+        list[str], typer.Option(help="schema.table=N, count(*) in that snapshot; repeatable.")
+    ],
+    compressor: Annotated[str, typer.Option(help="e.g. 'pigz -6'.")] = "unknown",
+) -> None:
+    """Add snapshot counts and the compressed sha256 to a signed manifest, then re-sign it.
+
+    Exit: 0 sealed; 3 tool error (bad/unsigned manifest, missing key, unreadable file)."""
+    from eguard.manifest import ManifestError, compressed_info, hmac_key_from_env, load, seal
+    from eguard.manifest import save as save_manifest
+    from eguard.models import SnapshotInfo
+
+    try:
+        counts = _db_counts(db_count)
+        key = hmac_key_from_env()
+        loaded = load(manifest)
+        if isinstance(loaded, str):
+            raise ManifestError(f"manifest unreadable: {loaded}")
+        snap = SnapshotInfo(
+            id=snapshot, isolation="repeatable read", taken_at=taken_at, counts=counts
+        )
+        info = compressed_info(compressed, compressor, load_policy()["stream"]["chunk_bytes"])
+        save_manifest(seal(loaded, key, snap, info), manifest)
+    except (OSError, ValueError, ManifestError) as exc:
+        err.print(f"[red]tool error:[/] {exc}")
+        raise typer.Exit(Verdict.TOOL_ERROR.exit_code) from exc
+    err.print(f"sealed: snapshot {snapshot}, {info.bytes:,} compressed bytes, sha256 {info.sha256}")
+
+
+EXPORT_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "export_with_manifest.sh"
+
+
+@app.command("export")
+def export(
+    table: Annotated[list[str], typer.Option(help="schema.table to dump; repeatable.")],
+    out: Annotated[Path, typer.Option(help="Compressed export to write (.sql.gz).")],
+    manifest: Annotated[
+        Path | None, typer.Option(help="Default: data/manifests/<name>.manifest.json.")
+    ] = None,
+) -> None:
+    """Hardened export (scripts/export_with_manifest.sh), then `eguard verify` on the result.
+
+    Exit: verify's own code (0 VERIFIED, 1 SUSPECT, 2 CORRUPT); 2 if any pipeline stage failed
+    (output renamed .FAILED); 3 tool/config error."""
+    import subprocess
+
+    if not EXPORT_SCRIPT.is_file():
+        err.print(f"[red]tool error:[/] {EXPORT_SCRIPT} not found")
+        raise typer.Exit(Verdict.TOOL_ERROR.exit_code)
+    cmd = [str(EXPORT_SCRIPT), *(["-m", str(manifest)] if manifest else []), str(out), *table]
+    raise typer.Exit(subprocess.run(cmd).returncode)

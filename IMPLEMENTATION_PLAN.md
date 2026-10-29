@@ -198,9 +198,9 @@ The **defence-in-depth matrix** (fault × layer, ✔ = caught) is the centrepiec
 ```bash
 set -euo pipefail                          # a failing exporter can no longer hide behind gzip
 # 1. open snapshot (psql session kept alive)  -> SNAP_ID, COUNT(*) per table in that snapshot
-# 2. pg_dump --snapshot=$SNAP_ID ... \
-#      | tee >(eguard manifest-build --out v3.manifest.json) \
-#      | pigz -6 > v3.sql.gz
+# 2. pg_dump --snapshot=$SNAP_ID ... | tee FIFO | pigz -6 > v3.sql.gz.partial
+#      with `eguard manifest-build --out v3.manifest.json < FIFO &` (a FIFO, not tee >(...):
+#      a process substitution's exit status never reaches PIPESTATUS)
 # 3. check PIPESTATUS for every stage; any non-zero -> mark export FAILED, keep file quarantined
 # 4. sha256 of the .gz recorded in the manifest; manifest stored separately from the dump
 # 5. immediately run: eguard verify v3.sql.gz --manifest v3.manifest.json

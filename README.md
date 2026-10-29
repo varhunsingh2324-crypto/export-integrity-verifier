@@ -63,11 +63,12 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–3 and phase 4 part A (skeleton, incident simulation, streaming core +
-> L1 container, L2 dump structure, L3 row validity, fingerprints + signed manifest + L4). `eguard
-> verify` runs L1–L4. L4 needs `--manifest`; without one it is SKIP. L5 is still SKIP, so a healthy
-> file is SUSPECT (exit 1): RAL 4 with a manifest, RAL 3 without. `make faults` builds F1–F6 (F1
-> needs the database). The hardened export (`eguard export`, snapshot counts) is phase 4 part B.
+> Implemented so far: phases 0–4 (skeleton, incident simulation, streaming core + L1 container,
+> L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened export).
+> `eguard verify` runs L1–L4. L4 needs `--manifest`; without one it is SKIP. A manifest from the
+> hardened export carries snapshot counts and the compressed sha256, so L4 can be fully evidenced;
+> any other manifest leaves those two checks SKIP. L5 is still SKIP, so a healthy export is
+> SUSPECT (exit 1, RAL 4 at best). `make faults` builds F1–F6 (needs the database).
 > `make verify-all`/`dashboard`/`demo` still exit non-zero with "not implemented yet" until their
 > phase lands.
 
@@ -76,9 +77,9 @@ make up            # start PostgreSQL 16 in Docker (the simulated "production" D
 make seed          # create the large table (configurable rows)
 make incident      # reproduce the incident: export v1, business change, export v2 (+30% rows, −20% size)
                    # (`python -m sim.incident run --scale 0.1` for a fast 30 000-row run)
-make faults        # fault gallery (F1–F6) + signed source manifest, from a 50 000-row variant
-                   # (`python -m sim.faults --only F4 --only F5`: rebuild some from the existing
-                   # source, no database)
+make faults        # fault gallery (F1–F6) from a 50 000-row variant; the source is a hardened
+                   # export (`python -m sim.faults --only F4 --only F5`: rebuild some from the
+                   # existing source and manifest, no database)
 make verify-all    # verify every export and print the scorecard
 make dashboard     # open the Streamlit dashboard
 ```
@@ -86,11 +87,12 @@ make dashboard     # open the Streamlit dashboard
 CLI:
 
 ```bash
-eguard verify  data/exports/v2.sql.gz --manifest data/manifests/v2.json   # L1–L4
-pg_dump … | tee >(eguard manifest-build --out v3.manifest.json) | pigz > v3.sql.gz
+eguard export  --table public.transactions --out data/exports/v3.sql.gz  # hardened export + verify
+eguard verify  data/exports/v3.sql.gz --manifest data/manifests/v3.manifest.json   # L1–L4
+pg_dump … | eguard manifest-build --out m.json   # manifest from any dump stream (stdin)
+eguard manifest-seal m.json --compressed f.gz --snapshot ID --taken-at T --db-count s.t=N
 eguard verify  data/exports/v2.sql.gz --dsn $PG_DSN                       # (planned)
 eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz      # size-anomaly forensics
-eguard export  --table transactions --out data/exports/v3.sql.gz   # hardened export + manifest
 ```
 
 Exit codes: `0` VERIFIED · `1` SUSPECT · `2` CORRUPT · `3` tool error — so it drops straight into cron/CI/monitoring.
@@ -219,7 +221,10 @@ manifest, L4 runs four checks:
 
 `make faults` pairs F2–F6 with the manifest of the source they were derived from
 (`data/manifests/fault_source_v2.manifest.json`, 65,000 rows, 7 chunks). F1 is a separate killed
-pg_dump run, so its L4 reference will be part B's snapshot counts.
+pg_dump run, so it has no manifest; part B's hardened export is what prevents it.
+
+The table below was measured in part A, when the source was a legacy export and its manifest was
+built in-process. Part B rebuilt the gallery; the current numbers are in the next section.
 
 | file | L1–L3 | L4 (vs source manifest) | verdict (exit) |
 |---|---|---|---|
@@ -234,6 +239,69 @@ An independent `diff` of the decompressed streams puts F4's single changed byte 
 is still valid and only L4 can see it. Fingerprinting costs about 0.1 s per 65,000 rows: verifying
 the source took 0.73–0.75 s without a manifest and 0.83–0.84 s with one, at a peak RSS of about
 51 MiB.
+
+### Hardened export (phase 4 part B)
+
+`scripts/export_with_manifest.sh` (or `eguard export`) is the fix for `legacy_export.sh`. It starts
+with `set -euo pipefail` and runs these steps:
+1. A psql session holds `BEGIN ISOLATION LEVEL REPEATABLE READ`, calls `pg_export_snapshot()`,
+   and runs `count(*)` per table in that snapshot.
+2. `pg_dump --snapshot=<id> | tee FIFO | pigz -6 > OUT.partial`, with `eguard manifest-build`
+   reading the FIFO. It's a FIFO rather than `tee >(…)` because a process substitution's exit
+   status never reaches `PIPESTATUS`.
+3. Every `PIPESTATUS` entry, manifest-build and the psql session are all checked.
+4. `eguard manifest-seal` adds the snapshot counts and the compressed sha256, then re-signs.
+5. Only then does `OUT.partial` become `OUT`, and `eguard verify --manifest` runs.
+
+On any failure the files become `.FAILED` and the script prints each stage's exit code. Exit codes
+follow rule 7:
+- verify's own code when the export completed (0 VERIFIED, 1 SUSPECT, 2 CORRUPT);
+- 2 if any pipeline stage failed;
+- 3 on a configuration error.
+
+Until L5 exists, a healthy export ends SUSPECT (exit 1), and the script says it is *not* reported
+as fully verified.
+
+L4 gains two checks:
+- `l4_snapshot_counts`: the file's rows against `count(*)` in the snapshot. The manifest is built
+  from the exporter's own stream, so only this check catches an exporter that cleanly emitted too
+  few rows.
+- `l4_compressed_sha256`: a match PASSes. A mismatch is a WARN if the decompressed stream still
+  matches (the file was recompressed), otherwise a FAIL.
+
+A manifest without these fields leaves both checks SKIP, so L4 isn't fully evidenced.
+
+**(1) Normal run**, `eguard export --table public.transactions --out data/exports/v3.sql.gz`:
+- snapshot `00000003-0000164B-1`: `count(*)` = 390,000;
+- the manifest's dump stream has 390,000 rows (39 chunks), and an independent `zcat | awk` count
+  of the COPY rows also gives 390,000;
+- pigz -6 wrote 39,329,780 bytes;
+- every L1–L4 check PASSes: SUSPECT (exit 1), RAL 4, in 10.5 s wall time.
+
+**(2) The same kill for both scripts**, `timeout 0.6` on pg_dump inside the container:
+
+| | exit | `gzip -t` | what is left | rows written (independent oracle) |
+|---|---|---|---|---|
+| `legacy_export.sh` | **0** | OK | `legacy_killed.sql.gz`, looks finished | 73,603 of 390,000, mid-COPY |
+| `export_with_manifest.sh` | **2** | – | only `*.sql.gz.FAILED` + `*.manifest.json.FAILED` | 165,353, mid-COPY; report: `pg_dump exit 124 <-- FAILED`, `manifest-build exit 1 <-- FAILED` |
+
+The kill point varies with timing, so the two runs stopped at different rows.
+
+**Fault gallery** (rebuilt: the source is now a hardened export of the 50,000-row variant's v2
+state, 65,000 rows, and F2–F6 are checked against its manifest):
+
+| file | failing checks | verdict (exit) |
+|---|---|---|
+| source `v2_hardened.sql.gz` | none | SUSPECT (1), RAL 4 |
+| F1: legacy pg_dump killed (`timeout 0.25`), `gzip -t` OK | `l2_complete`: *after row 30,716 … partial row of 61 bytes*, `l2_copy_blocks` (no manifest) | CORRUPT (2) |
+| F2: truncated at 70 % | `l1_stream_end`, L2, `l4_snapshot_counts`: *29,217 rows in the export vs 65,000 in the database* | CORRUPT (2) |
+| F3: one byte flipped | `l1_integrity`, `l3_row_validity` (26,016 of 46,885 rows), `l4_snapshot_counts` 46,885 vs 65,000 | CORRUPT (2) |
+| F4: `.Z`, one byte flipped (`gzip -dc` exits 0) | only L4: *first damaged chunk 3 of 7: rows 20,001–30,000*; `diff` oracle: row 22,149 | CORRUPT (2) |
+| F5: row 33,333 `amount` 2213.12 → 2214.12 | only L4: *chunk 4 of 7: rows 30,001–40,000* | CORRUPT (2) |
+| F6: COPY rows 10,001–20,000 sent twice | `l3_pk_unique`, `l4_snapshot_counts` 75,000 vs 65,000 | CORRUPT (2) |
+
+F3 differs from the part-A numbers because the source is now compressed by pigz, so the same
+offset flips a different deflate byte.
 
 ## Documentation
 

@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from eguard.config import load_policy
-from eguard.manifest import ManifestError, build_from_chunks, save
-from eguard.models import CheckResult, Status, Verdict, VerifyReport
+from eguard.manifest import ManifestError, build_from_chunks, compressed_info, save, seal
+from eguard.models import CheckResult, SnapshotInfo, Status, Verdict, VerifyReport
 from eguard.verify import verify_file
 from tests import pgdump
 from tests.gzutil import member
@@ -20,9 +20,24 @@ ROWS = pgdump.rows(N)
 HEADER = pgdump.header_lines()  # COPY header line; row r is on line HEADER + r
 
 
-def _manifest(tmp_path: Path, data: bytes, name: str = "m.json") -> Path:
+def _manifest(
+    tmp_path: Path, data: bytes, name: str = "m.json", *, db_rows: int | None = N
+) -> Path:
+    """Like the hardened export: built from the stream, then sealed with the snapshot count
+    (`db_rows`, None = unsealed) and the sha256 of exactly the file _verify writes."""
+    m = build_from_chunks([data], POLICY, KEY)
+    if db_rows is not None:
+        gz = tmp_path / f"{name}.written.gz"
+        gz.write_bytes(member(data))
+        snap = SnapshotInfo(
+            id="00000003-0000ABCD-1",
+            isolation="repeatable read",
+            taken_at="2026-10-29 10:00:00+00",
+            counts={pgdump.TABLE: db_rows},
+        )
+        m = seal(m, KEY, snap, compressed_info(gz, "test", 4096))
     path = tmp_path / name
-    save(build_from_chunks([data], POLICY, KEY), path)
+    save(m, path)
     return path
 
 
@@ -56,8 +71,10 @@ def test_clean_export_passes_every_l4_check(tmp_path: Path, manifest: Path) -> N
         "l4_manifest_signature",
         "l4_tables",
         "l4_row_counts",
+        "l4_snapshot_counts",
         "l4_fingerprint",
         "l4_stream_digest",
+        "l4_compressed_sha256",
     }
     assert all(c.status == Status.PASS for c in l4.values()), [c.message for c in l4.values()]
     assert report.verdict == Verdict.SUSPECT and report.ral == 4  # L5 still pending
@@ -70,6 +87,7 @@ def test_changed_value_is_localised_to_its_chunk(tmp_path: Path, manifest: Path)
     l4 = _l4(report)
     assert l4["l4_row_counts"].status == Status.PASS
     assert l4["l4_stream_digest"].status == Status.FAIL
+    assert l4["l4_compressed_sha256"].status == Status.FAIL
     fp = l4["l4_fingerprint"]
     assert fp.status == Status.FAIL
     assert fp.evidence["damaged_count"] == 1
@@ -116,10 +134,46 @@ def test_missing_and_extra_table(tmp_path: Path, manifest: Path) -> None:
 
 def test_manifest_of_incomplete_dump_fails_tables(tmp_path: Path) -> None:
     killed = pgdump.killed_at(N, 120)
-    l4 = _l4(_verify(tmp_path, killed, _manifest(tmp_path, killed)))
+    l4 = _l4(_verify(tmp_path, killed, _manifest(tmp_path, killed, db_rows=None)))
     assert l4["l4_row_counts"].status == Status.PASS  # the file is what the exporter emitted...
     assert l4["l4_tables"].status == Status.FAIL  # ...but the exporter's own stream was cut
     assert "incomplete" in l4["l4_tables"].message
+
+
+def test_exporter_dropped_rows_only_snapshot_counts_catch(tmp_path: Path) -> None:
+    """Exporter emitted 120 of the 300 rows the snapshot held, then ended *cleanly*: the manifest
+    agrees with the file, so only the snapshot count can tell."""
+    short = pgdump.dump_bytes(body=ROWS[:120])
+    report = _verify(tmp_path, short, _manifest(tmp_path, short, db_rows=N))
+    l4 = _l4(report)
+    for name in ("l4_tables", "l4_row_counts", "l4_fingerprint", "l4_stream_digest"):
+        assert l4[name].status == Status.PASS, name
+    snap = l4["l4_snapshot_counts"]
+    assert snap.status == Status.FAIL and report.verdict == Verdict.CORRUPT
+    assert snap.evidence["tables"][pgdump.TABLE] == {"snapshot": N, "export": 120, "manifest": 120}
+    assert "120 rows in the export vs 300 in the database" in snap.message
+
+
+def test_unsealed_manifest_skips_snapshot_and_sha(tmp_path: Path) -> None:
+    data = pgdump.dump_bytes(N)
+    report = _verify(tmp_path, data, _manifest(tmp_path, data, db_rows=None))
+    l4 = _l4(report)
+    assert l4["l4_snapshot_counts"].status == Status.SKIP
+    assert l4["l4_compressed_sha256"].status == Status.SKIP
+    assert all(
+        c.status == Status.PASS for n, c in l4.items() if "snapshot" not in n and "sha" not in n
+    )
+    assert report.verdict == Verdict.SUSPECT and report.ral == 3  # L4 lacks full evidence
+
+
+def test_recompressed_export_warns_not_corrupt(tmp_path: Path, manifest: Path) -> None:
+    path = tmp_path / "recompressed.sql.gz"
+    path.write_bytes(member(pgdump.dump_bytes(N), level=1))
+    report = verify_file(path, POLICY, manifest, KEY)
+    l4 = _l4(report)
+    assert l4["l4_compressed_sha256"].status == Status.WARN
+    assert l4["l4_stream_digest"].status == Status.PASS
+    assert report.verdict == Verdict.SUSPECT
 
 
 def test_tampered_manifest_fails_and_skips_reconciliation(tmp_path: Path, manifest: Path) -> None:

@@ -18,13 +18,14 @@ from pydantic import ValidationError
 
 from eguard import __version__
 from eguard.fingerprint import ALGORITHMS, Fingerprinter, StreamDigest
-from eguard.models import DumpStructure, Manifest, TableFingerprint
+from eguard.models import CompressedInfo, DumpStructure, Manifest, SnapshotInfo, TableFingerprint
 from eguard.parsers.pg_plain import COMPLETE, PgPlainParser
-from eguard.stream import FanOut
+from eguard.stream import FanOut, sniff
 
 FORMAT_VERSION = 1
 PLACEHOLDER_KEY = "change-me"  # the value in .env.example
 MAX_MANIFEST_BYTES = 16 << 20  # a manifest is KBs; refuse to slurp anything absurd
+OPTIONAL_SECTIONS = ("snapshot", "compressed")  # omitted from the signed JSON when None
 
 
 class ManifestError(Exception):
@@ -43,6 +44,9 @@ def hmac_key_from_env(env: Mapping[str, str] = os.environ) -> bytes:
 
 def canonical_bytes(m: Manifest) -> bytes:
     body = m.model_dump(mode="json", exclude={"signature"})
+    for section in OPTIONAL_SECTIONS:
+        if body[section] is None:
+            del body[section]
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 
 
@@ -56,6 +60,30 @@ def sign(m: Manifest, key: bytes) -> Manifest:
 
 def signature_ok(m: Manifest, key: bytes) -> bool:
     return m.signature is not None and hmac.compare_digest(m.signature, _mac(m, key))
+
+
+def file_sha256(path: Path, chunk_bytes: int) -> tuple[int, str]:
+    """(size, sha256) of a file, streamed."""
+    sha, size = hashlib.sha256(), 0
+    with path.open("rb") as fh:
+        while data := fh.read(chunk_bytes):
+            sha.update(data)
+            size += len(data)
+    return size, sha.hexdigest()
+
+
+def compressed_info(path: Path, compressor: str, chunk_bytes: int) -> CompressedInfo:
+    size, digest = file_sha256(path, chunk_bytes)
+    return CompressedInfo(format=sniff(path), compressor=compressor, bytes=size, sha256=digest)
+
+
+def seal(m: Manifest, key: bytes, snapshot: SnapshotInfo, compressed: CompressedInfo) -> Manifest:
+    """Add what is only known after the export (snapshot counts, compressed sha256) and re-sign.
+    Only a manifest whose signature verifies may be extended."""
+    if not signature_ok(m, key):
+        raise ManifestError("refusing to seal a manifest whose signature does not verify")
+    update = {"snapshot": snapshot, "compressed": compressed, "signature": None}
+    return sign(m.model_copy(update=update), key)
 
 
 def check_compatible(m: Manifest) -> None:

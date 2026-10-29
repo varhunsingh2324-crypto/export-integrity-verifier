@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from eguard.config import load_policy
-from eguard.manifest import build_from_chunks, save
-from eguard.models import Status, Verdict, VerifyReport
+from eguard.manifest import build_from_chunks, compressed_info, save, seal
+from eguard.models import SnapshotInfo, Status, Verdict, VerifyReport
 from eguard.verify import verify_file
 from sim.faults import (
     FROM_SOURCE,
@@ -75,10 +75,18 @@ def gallery(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
 
 @pytest.fixture(scope="module")
 def source_manifest(gallery: dict[str, Path], tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Built from the source stream, as the hardened pipeline would at export time."""
+    """What the hardened export writes for the source: built from its stream, then sealed with the
+    snapshot count and the compressed sha256 (`make faults` uses the real script)."""
     path = tmp_path_factory.mktemp("manifests") / "source.manifest.json"
     with gzip.open(gallery["F0"], "rb") as fh:
-        save(build_from_chunks(iter(lambda: fh.read(1 << 16), b""), POLICY, KEY), path)
+        m = build_from_chunks(iter(lambda: fh.read(1 << 16), b""), POLICY, KEY)
+    snap = SnapshotInfo(
+        id="00000003-0000ABCD-1",
+        isolation="repeatable read",
+        taken_at="2026-10-29 10:00:00+00",
+        counts={pgdump.TABLE: V2_ROWS},
+    )
+    save(seal(m, KEY, snap, compressed_info(gallery["F0"], "gzip -6", 1 << 16)), path)
     return path
 
 
@@ -170,7 +178,14 @@ def test_f6_duplicates_exactly_the_configured_rows(gallery: dict[str, Path]) -> 
 def test_f6_corrupt_at_l3_pk_and_l4_counts(reports: dict[str, VerifyReport]) -> None:
     f6 = reports["F6"]
     assert f6.verdict == Verdict.CORRUPT
-    assert _fails(f6) == {"l3_pk_unique", "l4_row_counts", "l4_fingerprint", "l4_stream_digest"}
+    assert _fails(f6) == {
+        "l3_pk_unique",
+        "l4_row_counts",
+        "l4_snapshot_counts",
+        "l4_fingerprint",
+        "l4_stream_digest",
+        "l4_compressed_sha256",
+    }
     (counts,) = [c for c in f6.checks if c.name == "l4_row_counts"]
     assert counts.evidence["tables"]["public.transactions"]["delta"] == CFG.f6.rows
     (c,) = [c for c in f6.checks if c.name == "l3_pk_unique"]
@@ -201,7 +216,7 @@ def test_f5_passes_l1_l3_and_l4_names_the_chunk(reports: dict[str, VerifyReport]
     f5 = reports["F5"]
     assert f5.verdict == Verdict.CORRUPT
     assert all(c.status == Status.PASS for c in f5.checks if c.layer <= 3)
-    assert _fails(f5) == {"l4_fingerprint", "l4_stream_digest"}
+    assert _fails(f5) == {"l4_fingerprint", "l4_stream_digest", "l4_compressed_sha256"}
     (fp,) = [c for c in f5.checks if c.name == "l4_fingerprint"]
     first = fp.evidence["first_damaged"]
     assert fp.evidence["damaged_count"] == 1

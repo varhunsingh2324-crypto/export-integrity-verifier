@@ -201,6 +201,24 @@ class StreamDigestInfo(BaseModel):
     sha256: str
 
 
+class SnapshotInfo(BaseModel):
+    """The REPEATABLE READ snapshot pg_dump ran in, and count(*) per table taken in it."""
+
+    id: str  # pg_export_snapshot()
+    isolation: str
+    taken_at: str  # now() of the snapshot transaction
+    counts: dict[str, int]  # qualified table -> count(*), named as pg_dump writes COPY headers
+
+
+class CompressedInfo(BaseModel):
+    """The compressed file as the exporter wrote it."""
+
+    format: str  # from the magic bytes
+    compressor: str
+    bytes: int
+    sha256: str
+
+
 class Manifest(BaseModel):
     """What the exporter emitted, recorded from the same stream (IMPLEMENTATION_PLAN §7).
 
@@ -216,4 +234,8 @@ class Manifest(BaseModel):
     dumped_by: str | None
     dump_complete: bool  # completion marker seen and every COPY block closed
     tables: list[TableFingerprint]
+    # Added by `eguard manifest-seal` once the export finished (hardened export). Left out of the
+    # signed JSON when None, so manifests made before these fields existed still verify.
+    snapshot: SnapshotInfo | None = None
+    compressed: CompressedInfo | None = None
     signature: str | None = None  # hex HMAC-SHA256 over the canonical JSON of all other fields

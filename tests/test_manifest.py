@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,13 +10,16 @@ from eguard.config import load_policy
 from eguard.manifest import (
     ManifestError,
     build_from_chunks,
+    compressed_info,
     hmac_key_from_env,
     load,
     save,
+    seal,
     signature_ok,
 )
-from eguard.models import Manifest
+from eguard.models import Manifest, SnapshotInfo
 from tests import pgdump
+from tests.gzutil import member
 
 POLICY = load_policy()
 KEY = b"test-hmac-key"
@@ -152,3 +156,96 @@ def test_cli_manifest_build_warns_on_placeholder_key(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0
     assert "placeholder" in result.stderr
+
+
+# -- sealing (hardened export) ------------------------------------------------------------
+SNAP = SnapshotInfo(
+    id="00000003-0000ABCD-1",
+    isolation="repeatable read",
+    taken_at="2026-10-29 10:00:00+00",
+    counts={"public.transactions": 300},
+)
+
+
+def _sealed(tmp_path: Path, manifest: Manifest) -> tuple[Manifest, Path]:
+    gz = tmp_path / "e.sql.gz"
+    gz.write_bytes(member(DATA))
+    return seal(manifest, KEY, SNAP, compressed_info(gz, "test -6", 4096)), gz
+
+
+def test_seal_adds_snapshot_and_compressed_and_resigns(tmp_path: Path, manifest: Manifest) -> None:
+    sealed, gz = _sealed(tmp_path, manifest)
+    assert signature_ok(sealed, KEY) and sealed.signature != manifest.signature
+    assert sealed.snapshot == SNAP
+    assert sealed.compressed is not None
+    assert sealed.compressed.bytes == gz.stat().st_size and sealed.compressed.format == "gzip"
+    assert sealed.compressed.sha256 == hashlib.sha256(gz.read_bytes()).hexdigest()
+    assert sealed.tables == manifest.tables
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        (("snapshot", "counts", "public.transactions"), 301),
+        (("snapshot", "id"), "00000003-0000ABCE-1"),
+        (("compressed", "sha256"), "0" * 64),
+        (("compressed", "bytes"), 1),
+    ],
+)
+def test_tampered_seal_fails_signature(
+    tmp_path: Path, manifest: Manifest, path: tuple, value: object
+) -> None:
+    sealed, _ = _sealed(tmp_path, manifest)
+    doc = json.loads(sealed.model_dump_json())
+    target = doc
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    assert not signature_ok(Manifest.model_validate(doc), KEY)
+
+
+def test_seal_refuses_untrusted_manifest(tmp_path: Path, manifest: Manifest) -> None:
+    gz = tmp_path / "e.gz"
+    gz.write_bytes(member(DATA))
+    info = compressed_info(gz, "x", 4096)
+    with pytest.raises(ManifestError, match="refusing"):
+        seal(manifest.model_copy(update={"chunk_rows": 5}), KEY, SNAP, info)
+    with pytest.raises(ManifestError):
+        seal(manifest, b"other-key", SNAP, info)
+
+
+def test_part_a_manifest_without_new_sections_still_verifies(manifest: Manifest) -> None:
+    doc = json.loads(manifest.model_dump_json())
+    del doc["snapshot"], doc["compressed"]  # exactly what a part-A manifest file contains
+    old = Manifest.model_validate(doc)
+    assert old.snapshot is None and signature_ok(old, KEY)
+
+
+def test_cli_manifest_seal(tmp_path: Path) -> None:
+    m, gz = tmp_path / "m.json", tmp_path / "e.sql.gz"
+    gz.write_bytes(member(DATA))
+    assert (
+        runner.invoke(app, ["manifest-build", "--out", str(m)], input=DATA, env=ENV).exit_code == 0
+    )
+    args = ["manifest-seal", str(m), "--compressed", str(gz), "--snapshot", SNAP.id]
+    args += ["--taken-at", SNAP.taken_at, "--db-count", "public.transactions=300"]
+    result = runner.invoke(app, [*args, "--compressor", "pigz -6"], env=ENV)
+    assert result.exit_code == 0, result.stderr
+    sealed = load(m)
+    assert isinstance(sealed, Manifest) and signature_ok(sealed, KEY)
+    assert sealed.snapshot is not None and sealed.snapshot.counts == {"public.transactions": 300}
+    assert sealed.compressed is not None and sealed.compressed.compressor == "pigz -6"
+
+
+def test_cli_manifest_seal_errors_are_tool_errors(tmp_path: Path) -> None:
+    m, gz = tmp_path / "m.json", tmp_path / "e.sql.gz"
+    gz.write_bytes(member(DATA))
+    runner.invoke(app, ["manifest-build", "--out", str(m)], input=DATA, env=ENV)
+    base = ["manifest-seal", str(m), "--compressed", str(gz), "--snapshot", "s", "--taken-at", "t"]
+    bad_count = runner.invoke(app, [*base, "--db-count", "public.transactions"], env=ENV)
+    assert bad_count.exit_code == 3 and "schema.table=N" in bad_count.stderr
+    doc = json.loads(m.read_text())
+    doc["chunk_rows"] = 3
+    m.write_text(json.dumps(doc))
+    tampered = runner.invoke(app, [*base, "--db-count", "public.transactions=300"], env=ENV)
+    assert tampered.exit_code == 3 and "refusing" in tampered.stderr

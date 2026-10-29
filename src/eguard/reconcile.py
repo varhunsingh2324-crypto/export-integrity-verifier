@@ -19,7 +19,14 @@ from eguard.models import (
 )
 
 LAYER = 4
-RECONCILE_CHECKS = ("l4_tables", "l4_row_counts", "l4_fingerprint", "l4_stream_digest")
+RECONCILE_CHECKS = (
+    "l4_tables",
+    "l4_row_counts",
+    "l4_snapshot_counts",
+    "l4_fingerprint",
+    "l4_stream_digest",
+    "l4_compressed_sha256",
+)
 Pair = tuple[str, TableFingerprint | None, TableFingerprint | None]
 
 
@@ -141,6 +148,76 @@ def check_row_counts(m: Manifest, tables: list[TableFingerprint]) -> CheckResult
     )
 
 
+def _not_recorded(name: str, message: str) -> CheckResult:
+    """A manifest made outside the hardened export lacks this evidence: SKIP, so L4 cannot count
+    as fully evidenced (option A, phase 4 part B)."""
+    return CheckResult(
+        layer=LAYER,
+        name=name,
+        status=Status.SKIP,
+        severity=Severity.INFO,
+        evidence={},
+        message=message,
+    )
+
+
+def check_snapshot_counts(m: Manifest, tables: list[TableFingerprint]) -> CheckResult:
+    """The export's rows vs count(*) in the snapshot pg_dump ran in. The manifest is built from the
+    exporter's own stream, so only this check catches an exporter that emitted too few rows."""
+    name = "l4_snapshot_counts"
+    if m.snapshot is None:
+        return _not_recorded(
+            name,
+            "manifest has no snapshot counts (not made by the hardened export): rows the exporter "
+            "itself failed to emit would go unnoticed",
+        )
+    seen, emitted = _keyed(tables), _keyed(m.tables)
+    counts = {
+        t: {
+            "snapshot": n,
+            "export": seen[t].count if t in seen else 0,
+            "manifest": emitted[t].count if t in emitted else 0,
+        }
+        for t, n in m.snapshot.counts.items()
+    }
+    evidence = {"snapshot_id": m.snapshot.id, "taken_at": m.snapshot.taken_at, "tables": counts}
+    bad = {t: c for t, c in counts.items() if c["export"] != c["snapshot"]}
+    if bad:
+        detail = "; ".join(
+            f"{t}: {c['export']:,} rows in the export vs {c['snapshot']:,} in the database"
+            for t, c in bad.items()
+        )
+        return _check(name, Status.FAIL, evidence, f"{detail} (snapshot {m.snapshot.id})")
+    total = sum(c["snapshot"] for c in counts.values())
+    return _check(
+        name, Status.PASS, evidence, f"{total:,} rows = count(*) in snapshot {m.snapshot.id}"
+    )
+
+
+def check_compressed_sha256(
+    m: Manifest, file_digest: tuple[int, str] | None, stream_ok: bool
+) -> CheckResult:
+    name = "l4_compressed_sha256"
+    if m.compressed is None or file_digest is None:
+        return _not_recorded(name, "manifest has no compressed sha256 (not a hardened export)")
+    size, sha = file_digest
+    evidence = {"manifest": m.compressed.model_dump(), "export": {"bytes": size, "sha256": sha}}
+    if (size, sha) == (m.compressed.bytes, m.compressed.sha256):
+        return _check(
+            name, Status.PASS, evidence, "byte-identical to the file the exporter wrote (sha256)"
+        )
+    if stream_ok:
+        msg = "compressed bytes differ but the decompressed stream is identical: recompressed"
+        return _check(name, Status.WARN, evidence, msg, critical=False)
+    return _check(
+        name,
+        Status.FAIL,
+        evidence,
+        f"not the file the exporter wrote ({size:,} bytes, sha256 {sha[:16]}…, manifest "
+        f"{m.compressed.bytes:,} bytes, {m.compressed.sha256[:16]}…)",
+    )
+
+
 def _summary(t: TableFingerprint | None) -> dict[str, Any] | None:
     return None if t is None else t.model_dump(include={"count", "sum64", "xor64", "root"})
 
@@ -244,13 +321,21 @@ def check_stream_digest(m: Manifest, info: StreamDigestInfo, rows_match: bool) -
 
 
 def check_reconcile(
-    m: Manifest, tables: list[TableFingerprint], info: StreamDigestInfo, max_examples: int
+    m: Manifest,
+    tables: list[TableFingerprint],
+    info: StreamDigestInfo,
+    max_examples: int,
+    file_digest: tuple[int, str] | None = None,
 ) -> list[CheckResult]:
-    """The checks after a valid signature (see check_signature)."""
+    """The checks after a valid signature (see check_signature). `file_digest` is the (size,
+    sha256) of the compressed file, computed only when the manifest records one."""
     fp = check_fingerprint(m, tables, max_examples)
+    stream = check_stream_digest(m, info, rows_match=fp.status != Status.FAIL)
     return [
         check_tables(m, tables),
         check_row_counts(m, tables),
+        check_snapshot_counts(m, tables),
         fp,
-        check_stream_digest(m, info, rows_match=fp.status != Status.FAIL),
+        stream,
+        check_compressed_sha256(m, file_digest, stream_ok=stream.status == Status.PASS),
     ]

@@ -19,8 +19,8 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 from rich.console import Console
 
-from eguard.config import load_policy
-from eguard.manifest import build_from_chunks, hmac_key_from_env, save
+from eguard.manifest import hmac_key_from_env, load
+from eguard.models import Manifest
 from sim.incident import (
     DEFAULT_SIM,
     LEGACY_EXPORT,
@@ -308,26 +308,40 @@ def make_f6(src: Path, dst: Path, cfg: F6Config) -> dict[str, Any]:
     }
 
 
-# Faults derived from fault_source/v2.sql.gz; they are verified against that source's manifest.
-# F1 is a separate (killed) pg_dump run: its reference is part B's snapshot counts.
+# Faults derived from the hardened export of the source (v2 state); they are verified against the
+# manifest that export wrote. F1 is a separate, killed legacy pg_dump run (no manifest by design).
 FROM_SOURCE = ("F2", "F3", "F4", "F5", "F6")
+SOURCE_NAME = "v2_hardened.sql.gz"
 SOURCE_MANIFEST = "fault_source_v2.manifest.json"
+HARDENED_EXPORT = ROOT / "scripts" / "export_with_manifest.sh"
 
 
-def build_source_manifest(src: Path, out: Path) -> dict[str, Any]:
-    """The manifest the hardened pipeline would have written for the source at export time: built
-    from the same decompressed stream (gzip's CRC vouches it is what pg_dump emitted)."""
-    with gzip.open(src, "rb") as fh:
-        chunks = iter(lambda: fh.read(COPY_CHUNK), b"")
-        m = build_from_chunks(chunks, load_policy(), hmac_key_from_env())
-    save(m, out)
+def manifest_summary(path: Path) -> dict[str, Any]:
+    m = load(path)
+    if not isinstance(m, Manifest):
+        raise RuntimeError(f"{path}: {m}")
     return {
-        "path": str(out),
-        "source": str(src),
+        "path": str(path),
         "rows": sum(t.count for t in m.tables),
         "chunk_rows": m.chunk_rows,
         "chunks": sum(len(t.chunks) for t in m.tables),
+        "snapshot": m.snapshot.model_dump() if m.snapshot else None,
+        "compressed": m.compressed.model_dump() if m.compressed else None,
     }
+
+
+def hardened_source(table: str, out: Path, manifest: Path) -> dict[str, Any]:
+    """Export the source with scripts/export_with_manifest.sh, so its manifest carries snapshot
+    counts and the compressed sha256. Exit 1 (SUSPECT: L5 pending) is the healthy result for now."""
+    proc = subprocess.run(
+        [str(HARDENED_EXPORT), "-m", str(manifest), str(out), table],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if proc.returncode not in (0, 1):
+        raise RuntimeError(f"hardened export exited {proc.returncode}: {proc.stderr[-2000:]}")
+    return manifest_summary(manifest) | {"source": str(out), "export_exit": proc.returncode}
 
 
 Maker = Callable[[], dict[str, Any]]
@@ -345,15 +359,18 @@ def _makers(cfg: FaultsConfig, source: Path, out_dir: Path, table: str) -> dict[
 
 
 def _with_incident(
-    cfg: FaultsConfig, sim: SimConfig, src_dir: Path, makers: dict[str, Maker]
-) -> tuple[IncidentResult, list[dict[str, Any]]]:
-    """Run the incident at `faults.source_rows` in its own schema, build every fault, drop it."""
+    cfg: FaultsConfig, sim: SimConfig, src_dir: Path, manifest: Path, makers: dict[str, Maker]
+) -> tuple[IncidentResult, dict[str, Any], list[dict[str, Any]]]:
+    """Run the incident at `faults.source_rows` in its own schema, export its v2 state with the
+    hardened script, build every fault, drop the schema."""
     scale = cfg.source_rows / sim.base_rows
     if scaled_rows(sim, scale) != cfg.source_rows:
         raise typer.BadParameter(f"source_rows {cfg.source_rows} not reachable from base_rows")
+    table = f"{cfg.schema_}.{sim.table}"
     try:
         incident = run_incident(sim, scale, cfg.schema_, src_dir)
-        return incident, [make() for make in makers.values()]
+        summary = hardened_source(table, src_dir / SOURCE_NAME, manifest)
+        return incident, summary, [make() for make in makers.values()]
     finally:
         drop_schema(cfg.schema_)
 
@@ -391,24 +408,24 @@ def build(
         typer.Option(help="Rebuild only these (F2-F6) from the existing source; no database."),
     ] = None,
 ) -> None:
-    """Without --only: run the incident at `faults.source_rows` in its own schema (dropped after)
-    and build F1-F6 from it; needs the database. Always (re)writes the source's signed manifest
-    (needs MANIFEST_HMAC_KEY). F7 lands with phase 7."""
+    """Without --only: run the incident at `faults.source_rows` in its own schema (dropped after),
+    export its v2 state with the hardened script (source + signed manifest with snapshot counts),
+    and build F1-F6; needs the database and MANIFEST_HMAC_KEY. F7 lands with phase 7."""
     cfg, sim = load_faults_config(), load_sim_config()
     hmac_key_from_env()  # fail before the slow part, not after it
     src_dir = out_dir / "fault_source"
-    source = src_dir / "v2.sql.gz"
+    source, manifest_path = src_dir / SOURCE_NAME, manifest_dir / SOURCE_MANIFEST
     makers = _makers(cfg, source, out_dir, f"{cfg.schema_}.{sim.table}")
     incident = None
     if only:
         if bad := sorted(set(only) - set(FROM_SOURCE)):
             raise typer.BadParameter(f"--only takes {', '.join(FROM_SOURCE)}, not {bad}")
-        if not source.exists():
-            raise typer.BadParameter(f"{source} missing: run a full `make faults` first")
+        if not (source.exists() and manifest_path.exists()):
+            raise typer.BadParameter(f"{source} or its manifest missing: run `make faults` first")
         records = [makers[f]() for f in sorted(set(only))]
+        manifest = manifest_summary(manifest_path) | {"source": str(source)}
     else:
-        incident, records = _with_incident(cfg, sim, src_dir, makers)
-    manifest = build_source_manifest(source, manifest_dir / SOURCE_MANIFEST)
+        incident, manifest, records = _with_incident(cfg, sim, src_dir, manifest_path, makers)
     body = _report_body(report, incident, manifest, records)
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(body, indent=2, default=str) + "\n")
