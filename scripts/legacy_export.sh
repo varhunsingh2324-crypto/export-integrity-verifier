@@ -8,10 +8,15 @@
 # Do not "fix" it here; the hardened pipeline is scripts/export_with_manifest.sh.
 #
 # usage: legacy_export.sh <schema.table> <out.sql.gz>
+#
+# Optional LEGACY_DUMP_TIMEOUT=<seconds>: run pg_dump under coreutils `timeout` inside the container,
+# the way a scheduler's job time limit kills it. sim/faults.py uses this to build F1. Unset = no limit.
 
 TABLE="${1:?usage: legacy_export.sh <schema.table> <out.sql.gz>}"
 OUT="${2:?usage: legacy_export.sh <schema.table> <out.sql.gz>}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIMIT=()
+[ -n "${LEGACY_DUMP_TIMEOUT:-}" ] && LIMIT=(timeout "$LEGACY_DUMP_TIMEOUT")
 
-docker compose -f "$ROOT/docker-compose.yml" exec -T db \
+docker compose -f "$ROOT/docker-compose.yml" exec -T db "${LIMIT[@]}" \
     pg_dump -U "${PGUSER:-eguard}" -d "${PGDATABASE:-eguard}" -t "$TABLE" | gzip > "$OUT"

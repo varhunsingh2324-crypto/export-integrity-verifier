@@ -17,12 +17,12 @@ from sim.incident import (
 )
 
 LEGACY = ROOT / "scripts" / "legacy_export.sh"
-TEST_SCALE = 0.02  # 20 000 rows: seconds, not minutes
+TEST_SCALE = 0.1  # 30 000 rows: seconds, not minutes
 
 
 def test_sim_config_loads() -> None:
     cfg = load_sim_config()
-    assert cfg.base_rows == 1_000_000
+    assert cfg.base_rows == 300_000
     assert -1 <= cfg.seed <= 1
     assert cfg.growth.fraction == cfg.targets.rows_change.value
 
@@ -35,7 +35,7 @@ def test_sim_config_rejects_bad_seed(tmp_path: Path) -> None:
         load_sim_config(bad)
 
 
-@pytest.mark.parametrize(("scale", "rows"), [(1.0, 1_000_000), (0.02, 20_000), (2.5, 2_500_000)])
+@pytest.mark.parametrize(("scale", "rows"), [(1.0, 300_000), (0.1, 30_000), (2.5, 750_000)])
 def test_scaled_rows(scale: float, rows: int) -> None:
     assert scaled_rows(load_sim_config(), scale) == rows
 
@@ -78,8 +78,8 @@ def incident_runs(tmp_path_factory: pytest.TempPathFactory) -> list[IncidentResu
 @pytest.mark.db
 def test_incident_hits_targets(incident_runs: list[IncidentResult]) -> None:
     result = incident_runs[0]
-    assert result.v1.rows == 20_000
-    assert result.v2.rows == 26_000
+    assert result.v1.rows == 30_000
+    assert result.v2.rows == 39_000
     assert result.rows_ok, result.rows_change
     assert result.size_ok, result.size_change
 

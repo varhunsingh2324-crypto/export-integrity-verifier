@@ -11,6 +11,12 @@ l1:
 l3:
   max_error_rate: 0          # any invalid row is CORRUPT
   max_error_examples: 20     # first N errors kept as evidence
+  # PK uniqueness. pg_dump declares the PRIMARY KEY after the data, so every NOT NULL column is a
+  # candidate until it shows pk_candidate_prune_dups duplicates (a healthy PK never does).
+  pk_set_limit: 200000            # exact 64-bit key-hash set per candidate up to this many keys
+  pk_bloom_bytes: 8388608         # then a Bloom filter of this size (+ spill file to confirm hits)
+  pk_bloom_hashes: 7
+  pk_candidate_prune_dups: 1000
 
 l4:
   chunk_rows: 100000         # rows per Merkle chunk, in stream order

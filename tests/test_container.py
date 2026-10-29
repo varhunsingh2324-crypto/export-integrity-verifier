@@ -10,6 +10,7 @@ from eguard.models import CheckResult, Status, Verdict
 from eguard.stream import open_decoder
 from eguard.verdict import decide
 from eguard.verify import verify_file
+from tests import pgdump
 from tests.gzutil import dump_like, member
 
 POLICY = load_policy()
@@ -152,8 +153,9 @@ def test_dotz_damage_is_invisible_to_l1(tmp_path: Path) -> None:
 
 def test_verify_file_skips_pending_layers(tmp_path: Path) -> None:
     path = tmp_path / "ok.gz"
-    path.write_bytes(member(DATA))
+    dump = pgdump.dump_bytes(3000)
+    path.write_bytes(member(dump))
     report = verify_file(path, POLICY)
-    assert report.verdict == Verdict.SUSPECT and report.ral == 1
-    assert {c.layer for c in report.checks if c.status == Status.SKIP} == {2, 3, 4, 5}
-    assert report.checks[0].evidence["decompressed_lines"] == 3000
+    assert report.verdict == Verdict.SUSPECT and report.ral == 3
+    assert {c.layer for c in report.checks if c.status == Status.SKIP} == {4, 5}
+    assert report.checks[0].evidence["decompressed_lines"] == dump.count(b"\n")

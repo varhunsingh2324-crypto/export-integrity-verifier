@@ -1,11 +1,13 @@
-"""Phase 2 benchmark: is `eguard verify` memory flat as the input grows?
+"""Streaming benchmark (phase 2, extended in phase 3): is `eguard verify` memory flat as the input
+grows? Since phase 3 the measured pass includes L2 (dump grammar) and L3 (every row + PK tracking).
 
 Runs `eguard verify --json` on v1.sql.gz and on a ≥ 1 GB multi-member gzip made by concatenating
 copies of v1 (a valid gzip file: `cat a.gz b.gz` decodes to the concatenated content). The big
 file is built by streamed copy; nothing is ever decompressed to disk. Peak RSS comes from wait4()
 for that one child; VmRSS is also sampled from /proc every 0.25 s to show the curve is flat, not
 just the peak.
-Results are appended to bench/results.md (rule 5: only measured numbers in docs).
+Results are appended to bench/results.md (rule 5: only measured numbers in docs). The big
+file is deleted as soon as it has been measured (rule 10: disk budget).
 """
 
 import json
@@ -33,8 +35,6 @@ MIB = 1 << 20
 
 
 def build_big() -> Path:
-    if BIG.exists() and BIG.stat().st_size == COPIES * V1.stat().st_size:
-        return BIG
     BIG.parent.mkdir(parents=True, exist_ok=True)
     with BIG.open("wb") as out:
         for _ in range(COPIES):
@@ -86,6 +86,12 @@ def measure(path: Path) -> dict:
         "verdict": report["verdict"],
         "exit": proc.returncode,
         "l1": {c["name"]: c["status"] for c in report["checks"] if c["layer"] == 1},
+        "fails": [c["name"] for c in report["checks"] if c["status"] == "FAIL"],
+        "l3_rows": next(
+            c["evidence"].get("rows_checked", 0)
+            for c in report["checks"]
+            if c["name"] in ("l3_row_validity", "l3_pending")
+        ),
         "wall_s": wall,
         "peak_rss_mib": usage.ru_maxrss / 1024,  # Linux: KiB
         "rss_samples": len(samples),
@@ -114,19 +120,20 @@ def _commit() -> str:
 
 def to_markdown(runs: list[dict]) -> str:
     lines = [
-        f"## L1 streaming memory — {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
+        f"## verify streaming memory (L1–L3) — {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
         "",
         f"`bench/l1_memory.py` · commit {_commit()} · Python {platform.python_version()} · "
         f"{_cpu()} · {os.cpu_count()} CPUs",
         "",
-        "| file | compressed | uncompressed | members | lines | wall | compressed MB/s | "
+        "| file | compressed | uncompressed | members | lines | L3 rows | wall | compressed MB/s | "
         "uncompressed MB/s | peak RSS | steady RSS min / median / max | verdict |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in runs:
         lines.append(
             f"| `{r['file']}` | {r['compressed_bytes'] / 1e6:,.1f} MB | "
             f"{r['uncompressed_bytes'] / 1e6:,.1f} MB | {r['members']} | {r['lines']:,} | "
+            f"{r['l3_rows']:,} | "
             f"{r['wall_s']:.1f} s | {r['compressed_bytes'] / 1e6 / r['wall_s']:.1f} | "
             f"{r['uncompressed_bytes'] / 1e6 / r['wall_s']:.1f} | {r['peak_rss_mib']:.1f} MiB | "
             f"{r['steady_rss_min_mib']:.1f} / {r['steady_rss_median_mib']:.1f} / "
@@ -138,8 +145,11 @@ def to_markdown(runs: list[dict]) -> str:
         "",
         f"Input grew {big['compressed_bytes'] / small['compressed_bytes']:.1f}× "
         f"(compressed); peak RSS changed {big['peak_rss_mib'] / small['peak_rss_mib']:.2f}×. "
-        "Verdict is SUSPECT because L2–L5 are not implemented yet; all L1 checks: "
-        + ", ".join(sorted({s for r in runs for s in r["l1"].values()})),
+        "L4/L5 are not implemented yet, so a healthy file is SUSPECT. Failing checks: "
+        + "; ".join(f"`{r['file']}`: {', '.join(r['fails']) or 'none'}" for r in runs)
+        + ". The big file is 7 complete dumps concatenated: L2 rightly flags everything after "
+        "the first completion marker and does not parse it, so L3 validates the first dump only "
+        "(see the L3 rows column). Row-scaled L3 memory is benched at 5×/10× scale in phase 8.",
         "",
     ]
     return "\n".join(lines)
@@ -148,7 +158,11 @@ def to_markdown(runs: list[dict]) -> str:
 def main() -> None:
     if not V1.is_file():
         sys.exit(f"{V1} not found — run `make incident` first")
-    runs = [measure(V1), measure(build_big())]
+    runs = [measure(V1)]
+    try:  # disk budget (rule 10): generate, measure, delete; only the numbers are kept
+        runs.append(measure(build_big()))
+    finally:
+        BIG.unlink(missing_ok=True)
     text = to_markdown(runs)
     print(text)
     header = (

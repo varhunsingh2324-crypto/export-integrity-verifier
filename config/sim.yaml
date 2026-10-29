@@ -2,7 +2,7 @@
 # PostgreSQL with generate_series; random() is seeded with setseed(seed) so runs are reproducible.
 
 seed: 0.42                    # setseed() argument, in [-1, 1]
-base_rows: 1000000            # v1 rows at --scale 1.0
+base_rows: 300000             # v1 rows at --scale 1.0 (disk budget: rule 10)
 table: transactions
 
 # v1 population: realistic, with high-entropy free text in remarks/meta.
@@ -41,7 +41,13 @@ targets:
   rows_change: {value: 0.30, tolerance: 0.01}
   size_change: {value: -0.20, tolerance: 0.03}
 
-# Fault-injection gallery (IMPLEMENTATION_PLAN.md §6), each derived from v2.
+# Fault-injection gallery (IMPLEMENTATION_PLAN.md §6). Disk budget (rule 10): faults never come
+# from the full dataset. `make faults` reruns the incident at source_rows in its own schema, F1 dumps
+# that live (v2-state) table, the rest derive from its v2.sql.gz; the schema is then dropped.
 faults:
+  source_rows: 50000
+  schema: eguard_faults
+  f1: {timeout_seconds: 2.0, max_attempts: 8}  # `timeout` on pg_dump; bisected until it dies mid-COPY
   f2: {truncate_fraction: 0.70}             # keep the first 70 % of the compressed bytes
   f3: {offset_fraction: 0.5, xor_mask: 1}   # XOR one byte at the middle of the file
+  f6: {start_row: 10001, rows: 10000}       # rows 10001-20000 of the COPY block sent twice

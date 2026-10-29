@@ -49,24 +49,32 @@ make up                # PostgreSQL 16 in Docker; waits until healthy (port: PG_
 make test              # creates .venv on first run, then pytest
 make lint              # ruff check + ruff format --check
 make doctor            # eguard doctor: toolchain + database reachability
+make disk              # du -sh .venv, data/, project total; docker system df
+make clean-data        # delete everything regenerable in data/ (rebuild: make incident faults)
 ```
+
+**Disk budget:** the whole project stays under ~1.5 GB. `.venv` alone is ~764 MB.
+- The full dataset is 300,000 rows.
+- Fault files are built from a 50,000-row variant.
+- `make bench` deletes its large inputs as soon as it has measured them.
 
 `make test` runs the database tests when `PG_DSN` is set and **fails** if the DB is unreachable.
 They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–2 (skeleton, incident simulation, streaming core + L1 container).
-> `eguard verify` runs L1 only and reports L2–L5 as SKIP, so a healthy file is SUSPECT (exit 1) for
-> now. `make faults` builds F2/F3 only. `make verify-all`/`dashboard`/`demo` still exit non-zero
-> with "not implemented yet" until their phase lands.
+> Implemented so far: phases 0–3 (skeleton, incident simulation, streaming core + L1 container,
+> L2 dump structure + L3 row validity). `eguard verify` runs L1–L3 and reports L4/L5 as SKIP, so a
+> healthy file is SUSPECT (exit 1, RAL 3) for now. `make faults` builds F1, F2, F3 and F6 (F1 needs
+> the database). `make verify-all`/`dashboard`/`demo` still exit non-zero with "not implemented
+> yet" until their phase lands.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
 make seed          # create the large table (configurable rows)
 make incident      # reproduce the incident: export v1, business change, export v2 (+30% rows, −20% size)
-                   # (`python -m sim.incident run --scale 0.02` for a fast 20 000-row run)
-make faults        # generate the fault-injection gallery (F2, F3 so far)
+                   # (`python -m sim.incident run --scale 0.1` for a fast 30 000-row run)
+make faults        # fault gallery (F1, F2, F3, F6 so far) from a 50 000-row incident variant
 make verify-all    # verify every export and print the scorecard
 make dashboard     # open the Streamlit dashboard
 ```
@@ -89,13 +97,16 @@ runs a privacy purge (old rows lose `remarks` and `meta.trace`) plus +30 % low-e
 exports **v2** the same way. Every knob is in `config/sim.yaml`; results are written to
 `data/reports/incident.json`, and the command exits 1 if the targets in `sim.yaml` are missed.
 
-Measured at the default 1 000 000 rows (`data/reports/incident.json`):
+Measured at the default 300 000 rows (`data/reports/incident.json`):
 
 | | rows | raw dump bytes | gzip bytes |
 |---|---:|---:|---:|
-| v1 | 1,000,000 | 327,100,588 | 164,938,516 |
-| v2 | 1,300,000 | 287,392,155 | 131,090,638 |
-| change | +30.00 % | −12.14 % | −20.52 % |
+| v1 | 300,000 | 98,052,781 | 49,476,886 |
+| v2 | 390,000 | 86,079,490 | 39,288,708 |
+| change | +30.00 % | −12.21 % | −20.59 % |
+
+The default used to be 1 000 000 rows, measured at +30.00 % rows and −20.52 % gzip. It was lowered
+for the disk budget, and no simulation knob needed recalibrating.
 
 Data is reproducible run to run; gzip sizes vary by a few bytes only because pg_dump ≥ 16.10 writes a
 random `\restrict` key into each dump.
@@ -111,18 +122,72 @@ get a WARN because the format has no checksum: `gzip -dc` exits 0 on a truncated
 `.Z`, so L1 cannot vouch for the content. One decompression pass fans out to every subscriber
 (`eguard.stream.FanOut`), and later layers attach to it.
 
-Against the incident exports (`make faults`, settings in `config/sim.yaml`; record in
-`data/reports/faults.json`):
+Against the incident exports. The fault files come from `make faults`: settings in
+`config/sim.yaml`, record in `data/reports/faults.json`, and since the disk-budget change they are
+built from the 50 000-row variant.
 
 | file | `gzip -t` | `eguard verify` L1 | verdict (exit) |
 |---|---|---|---|
-| v1, v2 | OK | all PASS | SUSPECT (1): L2–L5 not built yet |
+| v1, v2 | OK | all PASS | SUSPECT (1): L4/L5 not built yet |
 | F2: v2 truncated at 70 % | unexpected end of file | `l1_stream_end` FAIL (unexpected_eof) | CORRUPT (2) |
 | F3: one byte XOR 0x01 at 50 % | crc error | `l1_integrity` FAIL (CRC32 mismatch) | CORRUPT (2) |
 
-Memory stays flat as input grows (`make bench`, results in `bench/results.md`): peak RSS was
-39.6 MiB on v1 (164.9 MB) and 39.5 MiB on a 1,154.6 MB seven-member gzip (2,289.7 MB
-decompressed), at about 120 MB/s compressed.
+Memory stays flat as input grows (`make bench`, results in `bench/results.md`). With L1 only
+(phase 2, on the earlier 1 M-row v1), peak RSS was 39.6 MiB on v1 (164.9 MB) and 39.5 MiB on a
+1,154.6 MB seven-member gzip (2,289.7 MB decompressed), at about 120 MB/s compressed.
+
+### L2 dump structure and L3 row validity (phase 3)
+
+The same pass feeds a state machine for the PostgreSQL plain-dump grammar
+(`eguard/parsers/pg_plain.py`): `PREAMBLE → BODY ⇄ COPY_ROWS → COMPLETE`.
+
+**L2** checks four things:
+- the dump header is present;
+- every `COPY … FROM stdin;` has DDL and is closed by `\.`;
+- every table with data has exactly one COPY block;
+- the completion marker is present, nothing but the trailer follows it, and the
+  `\restrict`/`\unrestrict` keys match.
+
+When the stream stops early, L2 reports the table, the last complete row and the decompressed
+line.
+
+**L3** validates every row against the COPY header and the `CREATE TABLE` types in the same dump:
+- strict UTF-8;
+- field count;
+- COPY escapes;
+- NOT NULL;
+- a type parse for integers, numeric(p,s), floats, boolean, date, timestamp[tz], char/varchar(n),
+  text, json/jsonb, uuid and bytea.
+
+Columns of any other type are listed and give a WARN.
+
+**PK uniqueness.** pg_dump declares the PRIMARY KEY only *after* the data, so every NOT NULL
+column is tracked as a candidate until the declaration arrives.
+- A candidate is dropped once it shows `l3.pk_candidate_prune_dups` duplicates. A healthy key never
+  does, and a dropped key's count is reported as a lower bound.
+- Keys are 64-bit BLAKE2b hashes in an exact set up to `l3.pk_set_limit`. After that they go into
+  a Bloom filter, with every hash also written to a spill file.
+- A Bloom hit is only a suspect. It is reported only if the spill shows the hash at least twice, so
+  Bloom false positives never become findings. On the earlier 1.3 M-row v2, one suspect was
+  raised and rejected this way.
+
+The results below come from the 300 000-row incident exports, and from `make faults`, which
+builds the faults from the 50 000-row variant (`data/reports/faults.json`):
+
+| file | `gzip -t` | failing checks (L1–L3) | verdict (exit) |
+|---|---|---|---|
+| v1 (300,000 rows) | OK | none: every row valid, `id` unique (Bloom, 0 suspects) | SUSPECT (1): L4/L5 not built yet |
+| v2 (390,000 rows) | OK | none: every row valid, `id` unique (Bloom, 0 suspects) | SUSPECT (1) |
+| F1: `timeout 0.25` killed pg_dump inside `pg_dump \| gzip` | **OK** | `l2_complete`: *stream ended inside COPY eguard_faults.transactions after row 29,589 (decompressed line 29,639), then a partial row of 260 bytes*; `l2_copy_blocks`: COPY never closed | CORRUPT (2) |
+| F2: truncated at 70 % | unexpected end of file | `l1_stream_end`; L2 adds: ended inside COPY after row 29,216 | CORRUPT (2) |
+| F3: one byte flipped | crc error | `l1_integrity`; L3 adds: 1 row with 9 fields instead of 10 (line 20,919) | CORRUPT (2) |
+| F6: COPY rows 10,001–20,000 sent twice | OK | `l3_pk_unique`: ≥1,001 duplicate `id` (counting stops at the prune limit); first at line 20,051 | CORRUPT (2) |
+
+L2 and L3 cost throughput. In `make bench`, the 300 000-row v1 (49.5 MB) takes 4.0 s, or
+12.5 MB/s compressed, about 10× slower than L1 alone was. Peak RSS is 81.7 MiB on v1 and 81.6 MiB on
+the 7× file (346 MB, deleted after measuring). That file is 7 concatenated dumps, and L3 validates
+only the first of them, so it does not measure memory at 7× rows. That measurement is phase 8's
+scale bench.
 
 ## Documentation
 

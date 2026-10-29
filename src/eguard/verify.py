@@ -5,13 +5,14 @@ from typing import Any
 
 from eguard.container import check_container
 from eguard.models import CheckResult, Severity, Status, StreamEnd, VerifyReport
+from eguard.parsers.pg_plain import PgPlainParser
+from eguard.rows import RowValidator, check_rows
 from eguard.stream import Consumer, FanOut, open_decoder
+from eguard.structure import check_structure
 from eguard.verdict import decide
 
 # Layers not built yet are reported as SKIP, so the verdict can never exceed SUSPECT without them.
 PENDING_LAYERS = {
-    2: ("structure (dump grammar)", 3),
-    3: ("row validity", 3),
     4: ("reconciliation", 4),
     5: ("restore drill", 5),
 }
@@ -48,9 +49,15 @@ def verify_file(path: Path, policy: dict[str, Any]) -> VerifyReport:
     decoder = open_decoder(path, policy["stream"]["chunk_bytes"])
     fan = FanOut(policy["stream"]["max_line_bytes"])
     fan.subscribe(StreamStats())
+    parser = PgPlainParser()
+    rows = RowValidator(policy)
+    parser.add_listener(rows)
+    fan.subscribe(parser)
     end = fan.run(decoder, is_clean=lambda: decoder.info.error is None)
     checks = check_container(decoder.info, policy)
     checks[0].evidence["decompressed_lines"] = end.lines
+    checks += check_structure(parser.s, end)
+    checks += check_rows(rows)
     checks += _pending_checks()
     verdict, level = decide(checks)
     return VerifyReport(path=str(path), verdict=verdict, ral=level, checks=checks)

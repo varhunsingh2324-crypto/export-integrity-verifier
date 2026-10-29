@@ -116,3 +116,55 @@ class StreamEnd(BaseModel):
     bytes_out: int
     lines: int
     unterminated_tail: bool  # the last line delivered had no trailing newline
+
+
+class ColumnDef(BaseModel):
+    """One column of a CREATE TABLE in the dump (type text as pg_dump printed it)."""
+
+    name: str
+    type: str
+    not_null: bool = False
+
+
+class TableDef(BaseModel):
+    name: str  # qualified, as written in the dump (e.g. public.transactions)
+    columns: list[ColumnDef]
+    line: int
+    has_data: bool = True  # False for a partitioned parent (its rows live in the partitions)
+    primary_key: list[str] | None = None  # declared post-data by ALTER TABLE ... PRIMARY KEY
+
+
+class CopyBlock(BaseModel):
+    """One `COPY ... FROM stdin;` data block and what the stream showed of it."""
+
+    table: str
+    columns: list[str]
+    header_line: int
+    rows: int = 0
+    bytes: int = 0  # row bytes including their newlines
+    first_row_line: int | None = None
+    last_row_line: int | None = None
+    closed: bool = False
+    end_line: int | None = None  # line of the `\.` terminator
+
+
+class DumpStructure(BaseModel):
+    """Everything the pg plain-dump state machine learned; L2 turns this into checks."""
+
+    state: str  # PREAMBLE, BODY, COPY_ROWS, COMPLETE
+    header_line: int | None = None
+    dumped_from: str | None = None
+    dumped_by: str | None = None
+    restrict_key: str | None = None
+    unrestrict_key: str | None = None
+    tables: dict[str, TableDef] = Field(default_factory=dict)
+    copies: list[CopyBlock] = Field(default_factory=list)
+    bad_copy_headers: list[dict[str, Any]] = Field(default_factory=list)
+    stray_terminators: list[int] = Field(default_factory=list)
+    complete_line: int | None = None
+    after_complete: list[dict[str, Any]] = Field(default_factory=list)  # first few lines only
+    after_complete_count: int = 0
+    lines: int = 0
+    last_line: str | None = None  # last decompressed line (truncated) for evidence
+    partial_line_bytes: int = 0  # unterminated final line; inside COPY it is a partial row
+    open_statement: str | None = None  # stream ended inside a SQL statement (truncated text)

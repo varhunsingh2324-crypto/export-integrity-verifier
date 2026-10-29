@@ -236,7 +236,7 @@ def run_incident(cfg: SimConfig, scale: float, schema: str, out_dir: Path) -> In
 
 app = typer.Typer(help="Reproduce the ExportGuard incident (IMPLEMENTATION_PLAN.md §6).")
 console = Console()
-Scale = Annotated[float, typer.Option(help="Multiplier on base_rows (e.g. 0.02 for tests/CI).")]
+Scale = Annotated[float, typer.Option(help="Multiplier on base_rows (e.g. 0.1 for tests/CI).")]
 Schema = Annotated[str, typer.Option(help="Schema holding the transactions table.")]
 
 
