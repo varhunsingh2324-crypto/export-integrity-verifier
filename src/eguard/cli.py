@@ -17,6 +17,7 @@ from eguard.models import Status, Verdict, VerifyReport
 
 app = typer.Typer(help="ExportGuard: verify compressed database exports without re-importing.")
 console = Console()
+err = Console(stderr=True)
 
 TOOLS = ("gzip", "pigz", "compress")
 
@@ -101,25 +102,74 @@ def _print_report(report: VerifyReport) -> None:
     console.print(f"verdict: [bold {style}]{report.verdict}[/] (RAL {report.ral})")
 
 
+def _tool_error(path: str, exc: Exception, as_json: bool) -> typer.Exit:
+    if as_json:
+        typer.echo(json.dumps({"path": path, "verdict": "TOOL_ERROR", "error": str(exc)}))
+    else:
+        console.print(f"[red]tool error:[/] {exc}")
+    return typer.Exit(Verdict.TOOL_ERROR.exit_code)
+
+
 @app.command()
 def verify(
     path: Annotated[Path, typer.Argument(help="Compressed export (.gz or .Z; format from magic).")],
+    manifest: Annotated[
+        Path | None,
+        typer.Option(help="Signed manifest from export time; enables L4 (key: MANIFEST_HMAC_KEY)."),
+    ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
 ) -> None:
     """Verify an export in one streaming pass. Exit: 0 VERIFIED, 1 SUSPECT, 2 CORRUPT, 3 error."""
+    from eguard.manifest import ManifestError, hmac_key_from_env
     from eguard.stream import LineTooLong
     from eguard.verify import verify_file
 
     try:
-        report = verify_file(path, load_policy())
-    except (OSError, LineTooLong) as exc:
-        if as_json:
-            typer.echo(json.dumps({"path": str(path), "verdict": "TOOL_ERROR", "error": str(exc)}))
-        else:
-            console.print(f"[red]tool error:[/] {exc}")
-        raise typer.Exit(Verdict.TOOL_ERROR.exit_code) from exc
+        key = hmac_key_from_env() if manifest is not None else None
+        report = verify_file(path, load_policy(), manifest, key)
+    except (OSError, LineTooLong, ManifestError) as exc:
+        raise _tool_error(str(path), exc, as_json) from exc
     if as_json:
         typer.echo(report.model_dump_json(indent=2))
     else:
         _print_report(report)
     raise typer.Exit(report.verdict.exit_code)
+
+
+@app.command("manifest-build")
+def manifest_build(
+    out: Annotated[
+        Path | None, typer.Option(help="Write the manifest here (default: stdout).")
+    ] = None,
+) -> None:
+    """Read a decompressed dump from stdin (e.g. behind `tee`) and write a signed manifest.
+
+    Exit: 0 manifest written; 1 written, but the dump is incomplete; 3 tool error."""
+    from eguard.manifest import PLACEHOLDER_KEY, ManifestError, build_from_chunks, hmac_key_from_env
+    from eguard.manifest import save as save_manifest
+    from eguard.stream import LineTooLong
+
+    policy = load_policy()
+    stdin = typer.get_binary_stream("stdin")
+    size = policy["stream"]["chunk_bytes"]
+    try:
+        key = hmac_key_from_env()
+        m = build_from_chunks(iter(lambda: stdin.read(size), b""), policy, key)
+        if out is None:
+            typer.echo(m.model_dump_json(indent=2))
+        else:
+            save_manifest(m, out)
+    except (OSError, LineTooLong, ManifestError) as exc:
+        err.print(f"[red]tool error:[/] {exc}")
+        raise typer.Exit(Verdict.TOOL_ERROR.exit_code) from exc
+    if key == PLACEHOLDER_KEY.encode():
+        err.print("[yellow]warning:[/] MANIFEST_HMAC_KEY is the .env.example placeholder")
+    rows = sum(t.count for t in m.tables)
+    chunks = sum(len(t.chunks) for t in m.tables)
+    err.print(
+        f"manifest: {len(m.tables)} table(s), {rows:,} rows, {chunks} chunk(s), "
+        f"{m.stream.bytes:,} bytes, sha256 {m.stream.sha256[:16]}…"
+    )
+    if not m.dump_complete:
+        err.print("[red]dump incomplete:[/] no completion marker or an unclosed COPY block")
+        raise typer.Exit(1)

@@ -19,7 +19,7 @@ l3:
   pk_candidate_prune_dups: 1000
 
 l4:
-  chunk_rows: 100000         # rows per Merkle chunk, in stream order
+  chunk_rows: 10000          # rows per Merkle chunk, in stream order (the localisation unit)
 
 l5:
   detect_fraction: 0.001     # p: damaged-row fraction the drill must catch

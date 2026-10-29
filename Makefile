@@ -40,7 +40,7 @@ seed: $(STAMP)
 incident: $(STAMP)
 	$(PY) -m sim.incident run
 
-faults: $(STAMP)                # F1 (needs the DB: make up), F2, F3, F6; F4, F5, F7 later
+faults: $(STAMP)                # F1-F6 + signed source manifest (DB: make up; MANIFEST_HMAC_KEY); F7 later
 	$(PY) -m sim.faults
 
 clean-data:                     # delete regenerable data (rebuild: make incident faults)

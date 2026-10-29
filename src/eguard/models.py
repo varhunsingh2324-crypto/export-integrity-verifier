@@ -168,3 +168,52 @@ class DumpStructure(BaseModel):
     last_line: str | None = None  # last decompressed line (truncated) for evidence
     partial_line_bytes: int = 0  # unterminated final line; inside COPY it is a partial row
     open_statement: str | None = None  # stream ended inside a SQL statement (truncated text)
+
+
+class ChunkFingerprint(BaseModel):
+    """`chunk_rows` consecutive rows of one COPY block, in stream order (IMPLEMENTATION_PLAN §4)."""
+
+    index: int  # 1-based
+    first_row: int  # 1-based row position within the COPY block
+    last_row: int
+    first_line: int  # dump line numbers of those rows
+    last_line: int
+    digest: str  # hex blake2b-128 over the rows' 8-byte hashes
+
+
+class TableFingerprint(BaseModel):
+    """One COPY block. 64-bit values are 16-char hex so JSON never carries numbers above 2**53."""
+
+    table: str
+    count: int
+    sum64: str  # sum of row hashes mod 2**64
+    xor64: str  # xor of row hashes
+    root: str  # hex blake2b-128 over the chunk digests
+    closed: bool  # the block ended with `\.`
+    chunks: list[ChunkFingerprint]
+
+
+class StreamDigestInfo(BaseModel):
+    """The whole decompressed stream (DDL and markers included, unlike the row fingerprints)."""
+
+    bytes: int
+    lines: int
+    sha256: str
+
+
+class Manifest(BaseModel):
+    """What the exporter emitted, recorded from the same stream (IMPLEMENTATION_PLAN §7).
+
+    Only str/int/bool/list fields, so the canonical JSON that the HMAC signs survives a round trip.
+    """
+
+    format_version: int
+    tool: str
+    created_at: str  # ISO 8601 UTC
+    algorithms: dict[str, str]
+    chunk_rows: int = Field(gt=0)
+    stream: StreamDigestInfo
+    dumped_by: str | None
+    dump_complete: bool  # completion marker seen and every COPY block closed
+    tables: list[TableFingerprint]
+    signature: str | None = None  # hex HMAC-SHA256 over the canonical JSON of all other fields

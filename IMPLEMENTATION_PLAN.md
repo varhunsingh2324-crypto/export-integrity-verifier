@@ -108,7 +108,7 @@ A state machine over the decompressed lines of a PostgreSQL plain dump:
 ### L4 — Reconciliation (completeness & content)
 **Row fingerprint:** `h(row) = first 8 bytes of BLAKE2b(raw COPY line bytes)` as `uint64`.
 **Table fingerprint:** `(count, Σh mod 2⁶⁴, ⊕h)` — order-independent, so it is robust to row order.
-**Chunk Merkle:** every 100 000 rows in stream order → chunk hash; table root = hash of chunk hashes.
+**Chunk Merkle:** every 10 000 rows (`policy.l4.chunk_rows`) in stream order → chunk hash; table root = hash of chunk hashes.
 A mismatch is localised to a chunk (≈ a row range), which the report shows.
 
 Sources of truth, best first:

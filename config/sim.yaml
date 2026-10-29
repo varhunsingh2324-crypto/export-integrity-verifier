@@ -50,4 +50,6 @@ faults:
   f1: {timeout_seconds: 2.0, max_attempts: 8}  # `timeout` on pg_dump; bisected until it dies mid-COPY
   f2: {truncate_fraction: 0.70}             # keep the first 70 % of the compressed bytes
   f3: {offset_fraction: 0.5, xor_mask: 1}   # XOR one byte at the middle of the file
+  f4: {offset_fraction: 0.5, xor_mask: 1}   # `compress` the dump, then XOR one byte mid-file
+  f5: {row: 33333, column: amount, delta: "1.00"}  # one value changed, re-gzipped (valid container)
   f6: {start_row: 10001, rows: 10000}       # rows 10001-20000 of the COPY block sent twice

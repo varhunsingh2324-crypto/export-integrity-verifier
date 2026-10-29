@@ -63,18 +63,22 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–3 (skeleton, incident simulation, streaming core + L1 container,
-> L2 dump structure + L3 row validity). `eguard verify` runs L1–L3 and reports L4/L5 as SKIP, so a
-> healthy file is SUSPECT (exit 1, RAL 3) for now. `make faults` builds F1, F2, F3 and F6 (F1 needs
-> the database). `make verify-all`/`dashboard`/`demo` still exit non-zero with "not implemented
-> yet" until their phase lands.
+> Implemented so far: phases 0–3 and phase 4 part A (skeleton, incident simulation, streaming core +
+> L1 container, L2 dump structure, L3 row validity, fingerprints + signed manifest + L4). `eguard
+> verify` runs L1–L4. L4 needs `--manifest`; without one it is SKIP. L5 is still SKIP, so a healthy
+> file is SUSPECT (exit 1): RAL 4 with a manifest, RAL 3 without. `make faults` builds F1–F6 (F1
+> needs the database). The hardened export (`eguard export`, snapshot counts) is phase 4 part B.
+> `make verify-all`/`dashboard`/`demo` still exit non-zero with "not implemented yet" until their
+> phase lands.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
 make seed          # create the large table (configurable rows)
 make incident      # reproduce the incident: export v1, business change, export v2 (+30% rows, −20% size)
                    # (`python -m sim.incident run --scale 0.1` for a fast 30 000-row run)
-make faults        # fault gallery (F1, F2, F3, F6 so far) from a 50 000-row incident variant
+make faults        # fault gallery (F1–F6) + signed source manifest, from a 50 000-row variant
+                   # (`python -m sim.faults --only F4 --only F5`: rebuild some from the existing
+                   # source, no database)
 make verify-all    # verify every export and print the scorecard
 make dashboard     # open the Streamlit dashboard
 ```
@@ -82,7 +86,9 @@ make dashboard     # open the Streamlit dashboard
 CLI:
 
 ```bash
-eguard verify  data/exports/v2.sql.gz --manifest data/manifests/v2.json --dsn $PG_DSN
+eguard verify  data/exports/v2.sql.gz --manifest data/manifests/v2.json   # L1–L4
+pg_dump … | tee >(eguard manifest-build --out v3.manifest.json) | pigz > v3.sql.gz
+eguard verify  data/exports/v2.sql.gz --dsn $PG_DSN                       # (planned)
 eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz      # size-anomaly forensics
 eguard export  --table transactions --out data/exports/v3.sql.gz   # hardened export + manifest
 ```
@@ -188,6 +194,46 @@ L2 and L3 cost throughput. In `make bench`, the 300 000-row v1 (49.5 MB) takes 4
 the 7× file (346 MB, deleted after measuring). That file is 7 concatenated dumps, and L3 validates
 only the first of them, so it does not measure memory at 7× rows. That measurement is phase 8's
 scale bench.
+
+### Fingerprints, signed manifest and L4 (phase 4 part A)
+
+Every COPY row is hashed as `h = first 8 bytes of BLAKE2b-512(raw line)`, read as a big-endian
+uint64. Each COPY block gets:
+- a table fingerprint `(count, Σh mod 2⁶⁴, ⊕h)`, which does not depend on row order;
+- one chunk digest per `l4.chunk_rows` rows (10 000) in stream order, a BLAKE2b-128 over the rows'
+  hashes;
+- a root hash over the chunk digests.
+
+The whole decompressed stream also gets a sha256. `eguard manifest-build` computes all of this
+from a dump on stdin, so it can sit behind `tee` in the export pipe. It writes a pydantic
+`Manifest`, signed with HMAC-SHA256 using `MANIFEST_HMAC_KEY`.
+
+`eguard verify --manifest` checks the signature *before* the pass. A tampered, unsigned or
+unreadable manifest FAILs `l4_manifest_signature`, which makes the verdict CORRUPT, and the
+reconciliation checks are SKIPped: nothing is compared against an untrusted manifest. With a valid
+manifest, L4 runs four checks:
+- `l4_tables`
+- `l4_row_counts`
+- `l4_fingerprint`, which names each damaged chunk's row range and dump lines
+- `l4_stream_digest`, which catches damage outside the rows
+
+`make faults` pairs F2–F6 with the manifest of the source they were derived from
+(`data/manifests/fault_source_v2.manifest.json`, 65,000 rows, 7 chunks). F1 is a separate killed
+pg_dump run, so its L4 reference will be part B's snapshot counts.
+
+| file | L1–L3 | L4 (vs source manifest) | verdict (exit) |
+|---|---|---|---|
+| source v2 (65,000 rows) | all PASS | all PASS | SUSPECT (1), RAL 4: L5 not built yet |
+| F4: `.Z`, one byte XOR 0x01 at 50 % (`gzip -dc` exits 0) | all PASS (L1 WARN: no checksum) | `l4_fingerprint`: *first damaged chunk 3 of 7: rows 20,001–30,000 (dump lines 20,051–30,050)* | CORRUPT (2) |
+| F5: row 33,333 `amount` 2213.12 → 2214.12, re-gzipped | all PASS | `l4_fingerprint`: *chunk 4 of 7: rows 30,001–40,000 (dump lines 30,051–40,050)* | CORRUPT (2) |
+| F2, F3, F6 | as above | also FAIL: row counts 29,216 / 65,000 (F2) and 75,000 (F6); F3's damaged chunk is 3 | CORRUPT (2) |
+| source v2 + manifest with `count` edited | all PASS | `l4_manifest_signature` FAIL, rest SKIP | CORRUPT (2) |
+
+An independent `diff` of the decompressed streams puts F4's single changed byte at dump line
+22,160, which is row 22,110, inside the reported chunk 3. The flip landed in free text, so the row
+is still valid and only L4 can see it. Fingerprinting costs about 0.1 s per 65,000 rows: verifying
+the source took 0.73–0.75 s without a manifest and 0.83–0.84 s with one, at a peak RSS of about
+51 MiB.
 
 ## Documentation
 
