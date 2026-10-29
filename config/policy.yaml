@@ -1,0 +1,19 @@
+# Verdict thresholds. Values come from IMPLEMENTATION_PLAN.md §4.
+# Never edit these to make a test pass (rule 4).
+
+l3:
+  max_error_rate: 0          # any invalid row is CORRUPT
+  max_error_examples: 20     # first N errors kept as evidence
+
+l4:
+  chunk_rows: 100000         # rows per Merkle chunk, in stream order
+
+l5:
+  detect_fraction: 0.001     # p: damaged-row fraction the drill must catch
+  confidence: 0.95           # 1 - alpha
+
+exit_codes:
+  VERIFIED: 0
+  SUSPECT: 1
+  CORRUPT: 2
+  TOOL_ERROR: 3

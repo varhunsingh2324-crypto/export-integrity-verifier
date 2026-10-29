@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: eguard
+      POSTGRES_PASSWORD: eguard
+      POSTGRES_DB: eguard
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP, not the socket: the image's init-time server is socket-only, so this
+      # stays unhealthy until docker/initdb scripts (scratch schema) have run.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U eguard -d eguard"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

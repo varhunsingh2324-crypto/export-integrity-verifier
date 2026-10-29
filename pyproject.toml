@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eguard"
+version = "0.0.1"
+description = "ExportGuard: verify a compressed database export is complete and restorable without re-importing it"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer",
+    "rich",
+    "psycopg[binary]",
+    "pydantic>=2",
+    "pyyaml",
+    "jinja2",
+    "plotly",
+    "streamlit",
+    "datasketch",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "hypothesis", "ruff"]
+
+[project.scripts]
+eguard = "eguard.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["db: needs the PostgreSQL container (PG_DSN)"]

@@ -39,7 +39,25 @@ ExportGuard therefore checks five independent layers. Each one catches failures 
 The result is a **Recoverability Assurance Level (RAL 0–5)** — the number of layers that passed —
 so management gets one number, and engineers get the evidence chain behind it.
 
+## Development setup
+
+Needs Python 3.11+, Docker, and `gzip`/`pigz`/`compress` on `PATH`.
+
+```bash
+cp .env.example .env   # PG_DSN, SCRATCH_DSN, MANIFEST_HMAC_KEY
+make up                # PostgreSQL 16 in Docker; waits until healthy (port: PG_PORT, default 5432)
+make test              # creates .venv on first run, then pytest
+make lint              # ruff check + ruff format --check
+make doctor            # eguard doctor: toolchain + database reachability
+```
+
+`make test` runs the database tests when `PG_DSN` is set and **fails** if the DB is unreachable.
+They are skipped only when `PG_DSN` is unset.
+
 ## Quick start
+
+> Implemented so far: phase 0 (skeleton). The targets below still exit non-zero with
+> "not implemented yet" until their phase lands.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
@@ -58,7 +76,7 @@ eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz      # size-anomaly
 eguard export  --table transactions --out data/exports/v3.sql.gz   # hardened export + manifest
 ```
 
-Exit codes: `0` VERIFIED · `1` SUSPECT · `2` CORRUPT — so it drops straight into cron/CI/monitoring.
+Exit codes: `0` VERIFIED · `1` SUSPECT · `2` CORRUPT · `3` tool error — so it drops straight into cron/CI/monitoring.
 
 ## Documentation
 
