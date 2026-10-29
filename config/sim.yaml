@@ -40,3 +40,8 @@ growth:
 targets:
   rows_change: {value: 0.30, tolerance: 0.01}
   size_change: {value: -0.20, tolerance: 0.03}
+
+# Fault-injection gallery (IMPLEMENTATION_PLAN.md §6), each derived from v2.
+faults:
+  f2: {truncate_fraction: 0.70}             # keep the first 70 % of the compressed bytes
+  f3: {offset_fraction: 0.5, xor_mask: 1}   # XOR one byte at the middle of the file

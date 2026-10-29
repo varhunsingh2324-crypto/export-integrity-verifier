@@ -16,6 +16,8 @@ jobs:
           python-version: "3.11"
       # Same compose stack as local dev (initdb creates the scratch schema); the simulation runs
       # pg_dump/psql via `docker compose exec`, which a GitHub service container cannot provide.
+      # ncompress provides `compress`, so the .Z tests run in CI instead of skipping.
+      - run: sudo apt-get update && sudo apt-get install -y ncompress
       - run: make up
       - run: make lint
       - run: make test

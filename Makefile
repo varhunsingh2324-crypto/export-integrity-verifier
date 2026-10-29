@@ -36,10 +36,14 @@ seed: $(STAMP)
 incident: $(STAMP)
 	$(PY) -m sim.incident run
 
+faults: $(STAMP)                # F2, F3 so far (F1, F4-F7 with phases 3, 4, 7)
+	$(PY) -m sim.faults
+
+bench: $(STAMP)                 # L1 streaming memory/throughput so far (full bench: phase 8)
+	$(PY) bench/l1_memory.py
+
 # Stubs: fail loudly until their phase lands, so a stub never looks like success.
-faults:
-	@echo "make $@: not implemented yet (phases 1-4)" >&2; exit 1
 verify-all:
 	@echo "make $@: not implemented yet (phase 6)" >&2; exit 1
-dashboard bench demo:
+dashboard demo:
 	@echo "make $@: not implemented yet (phase 8)" >&2; exit 1

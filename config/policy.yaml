@@ -1,6 +1,13 @@
 # Verdict thresholds. Values come from IMPLEMENTATION_PLAN.md §4.
 # Never edit these to make a test pass (rule 4).
 
+stream:
+  chunk_bytes: 1048576       # compressed read size and max decompressed bytes per inflate step
+  max_line_bytes: 67108864   # longest decompressed line buffered; longer -> tool error (bounded memory)
+
+l1:
+  trailing_garbage: WARN     # non-gzip bytes after the last member (CRC-checked content is intact)
+
 l3:
   max_error_rate: 0          # any invalid row is CORRUPT
   max_error_examples: 20     # first N errors kept as evidence

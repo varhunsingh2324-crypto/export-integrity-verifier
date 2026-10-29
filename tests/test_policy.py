@@ -8,7 +8,10 @@ from eguard.models import Verdict
 
 def test_policy_has_required_keys() -> None:
     policy = load_policy()
-    assert {"l3", "l4", "l5", "exit_codes"} <= policy.keys()
+    assert {"stream", "l1", "l3", "l4", "l5", "exit_codes"} <= policy.keys()
+    assert policy["stream"]["chunk_bytes"] > 0
+    assert policy["stream"]["max_line_bytes"] >= policy["stream"]["chunk_bytes"]
+    assert policy["l1"]["trailing_garbage"] in {"PASS", "WARN", "FAIL"}
     assert 0 < policy["l5"]["detect_fraction"] < 1
     assert 0 < policy["l5"]["confidence"] < 1
     assert policy["l4"]["chunk_rows"] > 0

@@ -56,15 +56,17 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–1 (skeleton, incident simulation). Targets from `make faults`
-> onward still exit non-zero with "not implemented yet" until their phase lands.
+> Implemented so far: phases 0–2 (skeleton, incident simulation, streaming core + L1 container).
+> `eguard verify` runs L1 only and reports L2–L5 as SKIP, so a healthy file is SUSPECT (exit 1) for
+> now. `make faults` builds F2/F3 only. `make verify-all`/`dashboard`/`demo` still exit non-zero
+> with "not implemented yet" until their phase lands.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
 make seed          # create the large table (configurable rows)
 make incident      # reproduce the incident: export v1, business change, export v2 (+30% rows, −20% size)
                    # (`python -m sim.incident run --scale 0.02` for a fast 20 000-row run)
-make faults        # generate the fault-injection gallery
+make faults        # generate the fault-injection gallery (F2, F3 so far)
 make verify-all    # verify every export and print the scorecard
 make dashboard     # open the Streamlit dashboard
 ```
@@ -97,6 +99,30 @@ Measured at the default 1 000 000 rows (`data/reports/incident.json`):
 
 Data is reproducible run to run; gzip sizes vary by a few bytes only because pg_dump ≥ 16.10 writes a
 random `\restrict` key into each dump.
+
+### L1 container check (phase 2)
+
+`eguard verify FILE` streams the file once. It picks the format from the magic bytes, never from the
+file name. gzip is parsed by hand on top of raw zlib: header fields (MTIME, XFL level hint, OS,
+FNAME, FHCRC), multiple members, CRC32 and ISIZE (mod 2³²) per member, unexpected EOF, and trailing
+bytes. Trailing non-gzip bytes are a WARN by default (`l1.trailing_garbage` in `config/policy.yaml`).
+`.Z` files have their magic and max-bits byte checked and are decoded with `gzip -dc`. They always
+get a WARN because the format has no checksum: `gzip -dc` exits 0 on a truncated or bit-flipped
+`.Z`, so L1 cannot vouch for the content. One decompression pass fans out to every subscriber
+(`eguard.stream.FanOut`), and later layers attach to it.
+
+Against the incident exports (`make faults`, settings in `config/sim.yaml`; record in
+`data/reports/faults.json`):
+
+| file | `gzip -t` | `eguard verify` L1 | verdict (exit) |
+|---|---|---|---|
+| v1, v2 | OK | all PASS | SUSPECT (1): L2–L5 not built yet |
+| F2: v2 truncated at 70 % | unexpected end of file | `l1_stream_end` FAIL (unexpected_eof) | CORRUPT (2) |
+| F3: one byte XOR 0x01 at 50 % | crc error | `l1_integrity` FAIL (CRC32 mismatch) | CORRUPT (2) |
+
+Memory stays flat as input grows (`make bench`, results in `bench/results.md`): peak RSS was
+39.6 MiB on v1 (164.9 MB) and 39.5 MiB on a 1,154.6 MB seven-member gzip (2,289.7 MB
+decompressed), at about 120 MB/s compressed.
 
 ## Documentation
 

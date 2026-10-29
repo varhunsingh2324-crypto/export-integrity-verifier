@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import shutil
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -11,7 +12,8 @@ from rich.console import Console
 from rich.table import Table
 
 from eguard import __version__
-from eguard.models import Verdict
+from eguard.config import load_policy
+from eguard.models import Status, Verdict, VerifyReport
 
 app = typer.Typer(help="ExportGuard: verify compressed database exports without re-importing.")
 console = Console()
@@ -81,3 +83,43 @@ def doctor(
             table.add_row(c["name"], status, c["detail"])
         console.print(table)
     raise typer.Exit(0 if all_ok else Verdict.TOOL_ERROR.exit_code)
+
+
+STATUS_STYLE = {Status.PASS: "green", Status.FAIL: "red", Status.WARN: "yellow", Status.SKIP: "dim"}
+VERDICT_STYLE = {Verdict.VERIFIED: "green", Verdict.SUSPECT: "yellow", Verdict.CORRUPT: "red"}
+
+
+def _print_report(report: VerifyReport) -> None:
+    table = Table(title=f"eguard verify {report.path}")
+    for column in ("layer", "check", "status", "detail"):
+        table.add_column(column)
+    for c in report.checks:
+        style = STATUS_STYLE[c.status]
+        table.add_row(f"L{c.layer}", c.name, f"[{style}]{c.status}[/]", c.message)
+    console.print(table)
+    style = VERDICT_STYLE.get(report.verdict, "red")
+    console.print(f"verdict: [bold {style}]{report.verdict}[/] (RAL {report.ral})")
+
+
+@app.command()
+def verify(
+    path: Annotated[Path, typer.Argument(help="Compressed export (.gz or .Z; format from magic).")],
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Verify an export in one streaming pass. Exit: 0 VERIFIED, 1 SUSPECT, 2 CORRUPT, 3 error."""
+    from eguard.stream import LineTooLong
+    from eguard.verify import verify_file
+
+    try:
+        report = verify_file(path, load_policy())
+    except (OSError, LineTooLong) as exc:
+        if as_json:
+            typer.echo(json.dumps({"path": str(path), "verdict": "TOOL_ERROR", "error": str(exc)}))
+        else:
+            console.print(f"[red]tool error:[/] {exc}")
+        raise typer.Exit(Verdict.TOOL_ERROR.exit_code) from exc
+    if as_json:
+        typer.echo(report.model_dump_json(indent=2))
+    else:
+        _print_report(report)
+    raise typer.Exit(report.verdict.exit_code)
