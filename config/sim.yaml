@@ -1,0 +1,42 @@
+# Incident simulation knobs (IMPLEMENTATION_PLAN.md §6). Every row is generated inside
+# PostgreSQL with generate_series; random() is seeded with setseed(seed) so runs are reproducible.
+
+seed: 0.42                    # setseed() argument, in [-1, 1]
+base_rows: 1000000            # v1 rows at --scale 1.0
+table: transactions
+
+# v1 population: realistic, with high-entropy free text in remarks/meta.
+v1:
+  ts_start: "2022-01-01"
+  ts_end: "2025-01-01"
+  accounts: 200000
+  merchants: 50000
+  currencies: [USD, EUR, GBP, INR, JPY, AUD]
+  statuses: [settled, pending, reversed, failed, disputed]
+  channels: [web, mobile, pos, atm, branch, api]
+  remarks_chars: 120          # hex characters of free text per row
+  meta_trace_chars: 96        # hex characters in meta.trace per row
+
+# Data-privacy job between v1 and v2: rows older than cutoff lose remarks and meta keys.
+purge:
+  cutoff: "2022-11-01"
+  meta_drop_keys: [trace]
+
+# New app release: +fraction rows, low-cardinality and sorted by time.
+growth:
+  fraction: 0.30
+  ts_start: "2025-01-01"
+  ts_end: "2025-04-01"
+  accounts: 500
+  merchants: 20
+  currencies: [USD]
+  statuses: [settled]
+  channels: [mobile, api]
+  amounts: [4.99, 9.99, 19.99, 49.99]
+  meta: '{"v": 2}'
+
+# Acceptance targets for v2 vs v1 (IMPLEMENTATION_PLAN.md §9, phase 1). Fractions; tolerance is
+# absolute, e.g. rows_change 0.30 ± 0.01 means +29 % … +31 %.
+targets:
+  rows_change: {value: 0.30, tolerance: 0.01}
+  size_change: {value: -0.20, tolerance: 0.03}

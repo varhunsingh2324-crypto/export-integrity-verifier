@@ -7,17 +7,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      db:
-        image: postgres:16
-        env:
-          POSTGRES_USER: eguard
-          POSTGRES_PASSWORD: eguard
-          POSTGRES_DB: eguard
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U eguard -d eguard"
-          --health-interval 2s --health-timeout 3s --health-retries 30
     env:
       PG_DSN: postgresql://eguard:eguard@localhost:5432/eguard
     steps:
@@ -25,7 +14,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Create scratch schema
-        run: psql "$PG_DSN" -v ON_ERROR_STOP=1 -f docker/initdb/01-scratch.sql
+      # Same compose stack as local dev (initdb creates the scratch schema); the simulation runs
+      # pg_dump/psql via `docker compose exec`, which a GitHub service container cannot provide.
+      - run: make up
       - run: make lint
       - run: make test

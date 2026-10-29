@@ -38,4 +38,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = ["db: needs the PostgreSQL container (PG_DSN)"]

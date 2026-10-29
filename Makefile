@@ -30,9 +30,13 @@ lint: $(STAMP)
 doctor: $(STAMP)
 	$(VENV)/bin/eguard doctor
 
+seed: $(STAMP)
+	$(PY) -m sim.incident seed
+
+incident: $(STAMP)
+	$(PY) -m sim.incident run
+
 # Stubs: fail loudly until their phase lands, so a stub never looks like success.
-seed incident:
-	@echo "make $@: not implemented yet (phase 1)" >&2; exit 1
 faults:
 	@echo "make $@: not implemented yet (phases 1-4)" >&2; exit 1
 verify-all:

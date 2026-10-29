@@ -56,13 +56,14 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phase 0 (skeleton). The targets below still exit non-zero with
-> "not implemented yet" until their phase lands.
+> Implemented so far: phases 0–1 (skeleton, incident simulation). Targets from `make faults`
+> onward still exit non-zero with "not implemented yet" until their phase lands.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
 make seed          # create the large table (configurable rows)
 make incident      # reproduce the incident: export v1, business change, export v2 (+30% rows, −20% size)
+                   # (`python -m sim.incident run --scale 0.02` for a fast 20 000-row run)
 make faults        # generate the fault-injection gallery
 make verify-all    # verify every export and print the scorecard
 make dashboard     # open the Streamlit dashboard
@@ -77,6 +78,25 @@ eguard export  --table transactions --out data/exports/v3.sql.gz   # hardened ex
 ```
 
 Exit codes: `0` VERIFIED · `1` SUSPECT · `2` CORRUPT · `3` tool error — so it drops straight into cron/CI/monitoring.
+
+### The simulated incident
+
+`make incident` seeds `transactions` inside PostgreSQL (`generate_series`, fixed `setseed`), exports
+**v1** through the deliberately naive `scripts/legacy_export.sh` (`pg_dump | gzip`, no `pipefail`),
+runs a privacy purge (old rows lose `remarks` and `meta.trace`) plus +30 % low-entropy new rows, then
+exports **v2** the same way. Every knob is in `config/sim.yaml`; results are written to
+`data/reports/incident.json`, and the command exits 1 if the targets in `sim.yaml` are missed.
+
+Measured at the default 1 000 000 rows (`data/reports/incident.json`):
+
+| | rows | raw dump bytes | gzip bytes |
+|---|---:|---:|---:|
+| v1 | 1,000,000 | 327,100,588 | 164,938,516 |
+| v2 | 1,300,000 | 287,392,155 | 131,090,638 |
+| change | +30.00 % | −12.14 % | −20.52 % |
+
+Data is reproducible run to run; gzip sizes vary by a few bytes only because pg_dump ≥ 16.10 writes a
+random `\restrict` key into each dump.
 
 ## Documentation
 
