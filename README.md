@@ -63,16 +63,16 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–5 and phase 6 part A (skeleton, incident simulation, streaming core
+> Implemented so far: phases 0–6 (skeleton, incident simulation, streaming core
 > + L1 container, L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened
-> export, L5 restore drill, verdict engine + `verify-all` matrix). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
+> export, L5 restore drill, verdict engine + `verify-all` matrix, JSON + HTML reports). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
 > manifest from the hardened export carries snapshot counts and the compressed sha256, so L4 can be
 > fully evidenced; any other manifest leaves those two checks SKIP. L5 needs a scratch database
 > (`SCRATCH_DSN` or `--scratch-dsn`); without one it is SKIP. Only a hardened export with a scratch
 > database can reach VERIFIED (RAL 5). A SUSPECT verdict lists the missing evidence.
 > `make faults` builds F0–F7 and F1h (needs the database). `make verify-all` prints the fault matrix.
-> The HTML report is phase 6 part B. `make dashboard`/`demo` still exit non-zero with "not
-> implemented yet" until phase 8.
+> `make verify-all` also writes one JSON + HTML report per export to `data/reports/`.
+> `make dashboard`/`demo` still exit non-zero with "not implemented yet" until phase 8.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
@@ -94,7 +94,9 @@ eguard verify  data/exports/v3.sql.gz --manifest data/manifests/v3.manifest.json
 pg_dump … | eguard manifest-build --out m.json   # manifest from any dump stream (stdin)
 eguard manifest-seal m.json --compressed f.gz --snapshot ID --taken-at T --db-count s.t=N
 eguard verify  data/exports/v2.sql.gz --dsn $PG_DSN --seed 7   # + sample vs live table (drift)
+eguard verify  data/exports/v3.sql.gz --manifest … --report-dir data/reports  # + JSON + HTML
 eguard verify-all data/exports --json                            # every export, worst exit code
+eguard report  data/reports/verify_v3.json                        # re-render HTML from saved JSON
 eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz      # size-anomaly forensics
 ```
 
@@ -394,6 +396,29 @@ else `data/manifests/<name>.manifest.json`), runs `gzip -t` beside it, and write
 - F3 in this build: the flip damaged 1 row of 65,000, which the 2,995-row sample did not include,
   so L5 PASSes (L5 promises ≥0.1 % damage at 95 %). Another build garbled 24,786 rows and L5 FAILed.
   pg_dump's random `\restrict` key changes the compressed bytes every build.
+
+### JSON + HTML report (phase 6 part B)
+
+`--report-dir DIR` (`verify`, `verify-all`; `make verify-all` uses `data/reports`) writes
+`verify_<name>.json` (the same `VerifyReport` as `--json`) and `verify_<name>.html`. Subdirectories
+are part of the name (`verify_fault_source__v2`). `eguard report X.json` re-renders the HTML.
+
+The HTML is one self-contained file: inline CSS (light and dark), no script, no external URL, so it
+opens offline. Every value on the page comes from the checks' evidence, never from the file name:
+
+- a verdict banner with RAL n/5, the exit code and one status per layer;
+- 2–3 plain-English sentences for management (`report/view.summary`);
+- **where in the stream**: table, fingerprint chunk *k of n*, row range, dump line(s), compressed
+  byte offset, taken from L1–L5 evidence (e.g. F5: chunk 4 of 7, rows 30,001–40,000);
+- every check per layer, with its message and collapsible JSON evidence;
+- the L5 confidence statement, or why the drill gives none. On a non-VERIFIED file the page notes
+  that the drill only covers the rows that are in the file;
+- provenance: compressor and level hint (from the bytes), the compressor the manifest names,
+  `gzip -t`, pg_dump and server version, snapshot id and time, manifest signature status, the L5
+  seed, the eguard version and time.
+
+Dump text in evidence is HTML-escaped (Jinja2 autoescape). The 14 reports from `make verify-all`
+take 300 KB.
 
 `tests/test_fault_matrix.py` (database) builds the whole gallery with the real generators and pins
 gzip -t, every layer and the verdict, except F3/F4's L3/L5, which must instead agree with L4 and

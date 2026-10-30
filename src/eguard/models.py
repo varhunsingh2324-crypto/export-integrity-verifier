@@ -116,12 +116,44 @@ class LayerResult(BaseModel):
 class VerifyReport(BaseModel):
     path: str
     tool: str = ""  # eguard version that produced the report
+    generated_at: str = ""  # ISO 8601 UTC
+    manifest: str | None = None  # manifest path the export was reconciled against
     verdict: Verdict
     ral: int = Field(ge=0, le=5)
     exit_code: int = 0  # rule 7
     layers: list[LayerResult] = Field(default_factory=list)
     checks: list[CheckResult]
     reasons: list[str] = Field(default_factory=list)  # why not VERIFIED (verdict.explain)
+
+
+class Location(BaseModel):
+    """Where in the stream a non-PASS check found its problem (report/view.locations)."""
+
+    layer: int = Field(ge=1, le=5)
+    check: str
+    table: str | None = None
+    rows: tuple[int, int] | None = None  # 1-based row positions within the table's COPY block
+    lines: tuple[int, int] | None = None  # decompressed dump line numbers
+    chunk: tuple[int, int] | None = None  # (k, of n) fingerprint chunk
+    byte_offset: int | None = None  # compressed byte offset (container problems)
+    detail: str
+
+
+class Provenance(BaseModel):
+    """Who made the export and what it is anchored to; None = not recorded in the evidence."""
+
+    compressor: str | None = None  # from the container bytes
+    level_hint: str | None = None
+    manifest_compressor: str | None = None  # what the exporter says it ran, e.g. "pigz -6"
+    pg_dump: str | None = None
+    dumped_from: str | None = None
+    snapshot_id: str | None = None
+    snapshot_taken_at: str | None = None
+    manifest: str | None = None
+    manifest_status: str  # signed and valid / invalid ... / no manifest
+    manifest_created_at: str | None = None
+    l5_seed: int | None = None
+    tool: str
 
 
 class StreamEnd(BaseModel):

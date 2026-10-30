@@ -174,6 +174,10 @@ def verify(
     seed: Annotated[
         int | None, typer.Option(help="L5 sample seed (default: random, recorded in the report).")
     ] = None,
+    report_dir: Annotated[
+        Path | None,
+        typer.Option(help="Also write verify_<name>.json and .html (self-contained) here."),
+    ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
 ) -> None:
     """Verify an export in one streaming pass. Exit: 0 VERIFIED, 1 SUSPECT, 2 CORRUPT, 3 error."""
@@ -198,7 +202,40 @@ def verify(
         typer.echo(report.model_dump_json(indent=2))
     else:
         _print_report(report)
+    if report_dir is not None:
+        from eguard.matrix import report_stem
+
+        _write_reports(report, report_dir, report_stem(path, path.parent))
     raise typer.Exit(report.verdict.exit_code)
+
+
+def _write_reports(
+    report: VerifyReport, out_dir: Path, stem: str, gzip_t: int | None = None
+) -> None:
+    from eguard.report.html import write_reports
+
+    json_path, html_path = write_reports(report, out_dir, stem, gzip_t=gzip_t)
+    err.print(f"report: {json_path} + {html_path.name}")
+
+
+@app.command("report")
+def report_cmd(
+    report_json: Annotated[Path, typer.Argument(help="A saved `verify --json` report.")],
+    out: Annotated[Path | None, typer.Option(help="HTML to write (default: same name).")] = None,
+) -> None:
+    """Re-render the self-contained HTML from a saved JSON report. Exit: 0 written; 3 error."""
+    from pydantic import ValidationError
+
+    from eguard.report.html import render_html
+
+    try:
+        report = VerifyReport.model_validate_json(report_json.read_text())
+        target = out or report_json.with_suffix(".html")
+        target.write_text(render_html(report), encoding="utf-8")
+    except (OSError, ValidationError) as exc:
+        err.print(f"[red]tool error:[/] {exc}")
+        raise typer.Exit(Verdict.TOOL_ERROR.exit_code) from exc
+    err.print(f"report: {target}")
 
 
 @app.command("manifest-build")
@@ -355,21 +392,33 @@ def verify_all(
     ] = None,
     seed: Annotated[int | None, typer.Option(help="L5 sample seed (default: random).")] = None,
     out: Annotated[Path | None, typer.Option(help="Also write the JSON matrix here.")] = None,
+    report_dir: Annotated[
+        Path | None,
+        typer.Option(help="Also write one verify_<name>.json + .html per export here."),
+    ] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
 ) -> None:
     """Verify every .gz/.Z export under ROOT; print fault × (gzip -t, L1-L5, verdict).
 
     Exit: the worst row (3 tool error > 2 CORRUPT > 1 SUSPECT > 0 VERIFIED); 3 if none found."""
-    from eguard.matrix import discover, gallery_records, pairing, verify_one, worst_exit
+    from eguard.matrix import (
+        discover,
+        gallery_records,
+        pairing,
+        report_stem,
+        verify_one,
+        worst_exit,
+    )
 
     policy = load_policy()
     known = gallery_records(gallery)
     rows = []
     for path in discover(root):
         label, manifest = pairing(path, known, manifests)
-        rows.append(
-            verify_one(path, label, manifest, policy, scratch_dsn=scratch_dsn or None, seed=seed)
-        )
+        row = verify_one(path, label, manifest, policy, scratch_dsn=scratch_dsn or None, seed=seed)
+        if report_dir is not None and row.report is not None:
+            _write_reports(row.report, report_dir, report_stem(path, root), row.gzip_t)
+        rows.append(row)
     code = worst_exit(rows)
     body = {"root": str(root), "exit_code": code, "rows": [r.model_dump(mode="json") for r in rows]}
     if out is not None:

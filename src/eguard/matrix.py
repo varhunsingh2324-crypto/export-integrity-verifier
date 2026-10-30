@@ -58,6 +58,12 @@ def export_name(path: Path) -> str:
     return path.name
 
 
+def report_stem(path: Path, root: Path) -> str:
+    """`verify_<path under root>` with `/` -> `__`: fault_source/v2.sql.gz and v2.sql.gz differ."""
+    rel = path.relative_to(root) if path.is_relative_to(root) else Path(path.name)
+    return "verify_" + "__".join([*rel.parent.parts, export_name(rel)])
+
+
 def pairing(
     path: Path, known: dict[Path, tuple[str, Path | None]], manifests: Path
 ) -> tuple[str, Path | None]:

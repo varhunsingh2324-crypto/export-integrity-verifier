@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ExportGuard report</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #66665f; --line: #deded8;
+  --code: #f0f0ec;
+  --pass: #1f7a3a; --pass-bg: #e6f4ea; --fail: #b3261e; --fail-bg: #fbe9e7;
+  --warn: #8a5a00; --warn-bg: #fff4dc; --skip: #66665f; --skip-bg: #ededea;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161614; --panel: #1f1f1d; --text: #ecece8; --muted: #a3a39b; --line: #3a3a36;
+    --code: #2a2a27;
+    --pass: #6fd08c; --pass-bg: #17321f; --fail: #ff8a80; --fail-bg: #3b1714;
+    --warn: #f5c35c; --warn-bg: #3a2c0c; --skip: #a3a39b; --skip-bg: #2a2a27;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 32px 0 8px; }
+.muted { color: var(--muted); }
+.path { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
+.banner { border-radius: 10px; padding: 18px 20px; margin: 16px 0; border: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; }
+.banner .verdict { font-size: 28px; font-weight: 700; letter-spacing: .02em; }
+.banner .ral { font-size: 18px; font-weight: 600; }
+.VERIFIED { background: var(--pass-bg); color: var(--pass); }
+.SUSPECT { background: var(--warn-bg); color: var(--warn); }
+.CORRUPT, .TOOL_ERROR { background: var(--fail-bg); color: var(--fail); }
+.summary { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 18px; font-size: 16px; }
+.summary p { margin: 0 0 6px; } .summary p:last-child { margin: 0; }
+.wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px;
+  border-bottom: 1px solid var(--line); }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.st { display: inline-block; min-width: 44px; text-align: center; font-size: 12px; font-weight: 700;
+  border-radius: 4px; padding: 1px 6px; }
+.st.PASS { background: var(--pass-bg); color: var(--pass); }
+.st.FAIL { background: var(--fail-bg); color: var(--fail); }
+.st.WARN { background: var(--warn-bg); color: var(--warn); }
+.st.SKIP { background: var(--skip-bg); color: var(--skip); }
+tr.layer td { background: var(--code); font-weight: 600; }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+pre { background: var(--code); border-radius: 6px; padding: 8px 10px; margin: 6px 0 0;
+  font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap;
+  word-break: break-all; max-height: 360px; overflow: auto; }
+dl { display: grid; grid-template-columns: minmax(140px, max-content) 1fr; gap: 6px 16px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px;
+  margin: 0; }
+dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
+.confidence { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 18px; margin: 0; }
+footer { margin-top: 32px; font-size: 13px; }
+@media print { details { display: block; } details > pre { display: block; } }
+</style>
+</head>
+<body>
+<main>
+<h1>ExportGuard verification report</h1>
+<div class="muted path">{{ r.path }}</div>
+
+<section class="banner {{ r.verdict }}" aria-label="verdict">
+  <span class="verdict">{{ r.verdict }}</span>
+  <span class="ral">RAL {{ r.ral }}/5</span>
+  <span>exit code {{ r.exit_code }}</span>
+  <span>
+  {% for lr in r.layers %}<span class="st {{ lr.status }}" title="{{ lr.name }}">L{{ lr.layer }} {{ lr.status }}</span> {% endfor %}
+  </span>
+</section>
+
+<section class="summary" aria-label="summary">
+{% for sentence in summary %}
+  <p>{{ sentence }}</p>
+{% endfor %}
+</section>
+
+{% if r.reasons %}
+<h2>{{ "What failed" if r.verdict == "CORRUPT" else "Missing evidence" }}</h2>
+<ul>
+{% for reason in r.reasons %}
+  <li>{{ reason }}</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+<h2>Where in the stream</h2>
+{% if locations %}
+<div class="wrap"><table>
+  <tr><th>Layer</th><th>Check</th><th>Location</th><th>Finding</th></tr>
+  {% for loc, place in locations %}
+  <tr><td>L{{ loc.layer }}</td><td>{{ loc.check }}</td><td>{{ place }}</td><td>{{ loc.detail }}</td></tr>
+  {% endfor %}
+</table></div>
+{% if locations_more %}<p class="muted">… and {{ locations_more }} more location(s) in the JSON report.</p>{% endif %}
+{% else %}
+<p class="muted">No check located a problem in the stream.</p>
+{% endif %}
+
+<h2>Layers and evidence</h2>
+<div class="wrap"><table>
+  <tr><th>Check</th><th>Status</th><th>Severity</th><th>Result and evidence</th></tr>
+  {% for lr, checks in layers %}
+  <tr class="layer"><td colspan="2">L{{ lr.layer }} {{ lr.name }}</td>
+    <td><span class="st {{ lr.status }}">{{ lr.status }}</span></td>
+    <td>{{ lr.reason if lr.status != "PASS" else lr.checks ~ " check(s), all PASS (counts toward RAL)" }}</td></tr>
+    {% for c in checks %}
+  <tr><td>{{ c.name }}</td><td><span class="st {{ c.status }}">{{ c.status }}</span></td>
+    <td>{{ c.severity }}</td>
+    <td>{{ c.message }}
+      {% if c.evidence %}<details><summary>evidence</summary><pre>{{ evidence(c.evidence) }}</pre></details>{% endif %}
+    </td></tr>
+    {% endfor %}
+  {% endfor %}
+</table></div>
+
+<h2>Restore drill confidence (L5)</h2>
+<div class="confidence">
+{% for statement in confidence %}
+  <p>{{ statement }}</p>
+{% endfor %}
+{% if r.verdict != "VERIFIED" %}
+  <p class="muted">The drill only covers rows that are in this file. It does not outweigh the {{ "failures" if r.verdict == "CORRUPT" else "missing evidence" }} listed above.</p>
+{% endif %}
+</div>
+
+<h2>Provenance</h2>
+<dl>
+  <dt>Compressor (from bytes)</dt><dd>{{ prov.compressor or "not recorded" }}{% if prov.level_hint %} · level hint: {{ prov.level_hint }}{% endif %}</dd>
+  <dt>Compressor (manifest)</dt><dd>{{ prov.manifest_compressor or "not recorded" }}</dd>
+  {% if gzip_t is not none %}<dt>gzip -t</dt><dd>{{ "OK (exit 0)" if gzip_t == 0 else "FAIL (exit " ~ gzip_t ~ ")" }}</dd>{% endif %}
+  <dt>pg_dump</dt><dd>{{ prov.pg_dump or "not recorded" }}</dd>
+  <dt>Source database</dt><dd>{{ prov.dumped_from or "not recorded" }}</dd>
+  <dt>Snapshot</dt><dd>{% if prov.snapshot_id %}{{ prov.snapshot_id }} (repeatable read, taken {{ prov.snapshot_taken_at }}){% else %}not recorded{% endif %}</dd>
+  <dt>Manifest</dt><dd>{{ prov.manifest_status }}{% if prov.manifest %}<br><span class="path muted">{{ prov.manifest }}</span>{% endif %}{% if prov.manifest_created_at %}<br><span class="muted">created {{ prov.manifest_created_at }}</span>{% endif %}</dd>
+  <dt>L5 sample seed</dt><dd>{{ prov.l5_seed if prov.l5_seed is not none else "not recorded" }}</dd>
+  <dt>Verified by</dt><dd>{{ prov.tool }}{% if r.generated_at %} at {{ r.generated_at }}{% endif %}</dd>
+</dl>
+
+<footer class="muted">Exit codes: 0 VERIFIED · 1 SUSPECT · 2 CORRUPT · 3 tool error. RAL = number of layers (0–5) whose checks all passed with full evidence. The JSON report next to this file holds the same checks and evidence.</footer>
+</main>
+</body>
+</html>

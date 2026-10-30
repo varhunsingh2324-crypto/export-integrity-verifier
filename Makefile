@@ -55,9 +55,11 @@ bench: $(STAMP)                 # L1 streaming memory/throughput so far (full be
 	$(PY) bench/l1_memory.py
 
 # Matrix of every export: fault x (gzip -t, L1-L5, verdict). eguard exits with the worst verdict
-# (rule 7); make itself fails only on a tool error (3), since the fault gallery is CORRUPT by design.
+# (rule 7); one JSON + HTML report per export lands in data/reports. make itself fails only on a
+# tool error (3), since the fault gallery is CORRUPT by design.
 verify-all: $(STAMP)
-	$(VENV)/bin/eguard verify-all data/exports --out data/reports/verify_all.json || [ $$? -le 2 ]
+	$(VENV)/bin/eguard verify-all data/exports --out data/reports/verify_all.json \
+		--report-dir data/reports || [ $$? -le 2 ]
 
 # Stubs: fail loudly until their phase lands, so a stub never looks like success.
 dashboard demo:

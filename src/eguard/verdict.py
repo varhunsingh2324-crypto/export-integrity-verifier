@@ -7,6 +7,7 @@ CORRUPT + RAL 0-5. The rules come from config/policy.yaml `verdict`.
 RAL = number of layers whose checks all PASS (full evidence).
 """
 
+from datetime import UTC, datetime
 from typing import Any
 
 from eguard import __version__
@@ -97,11 +98,15 @@ def explain(checks: list[CheckResult], verdict: Verdict, policy: dict[str, Any])
     return reasons
 
 
-def build_report(path: str, checks: list[CheckResult], policy: dict[str, Any]) -> VerifyReport:
+def build_report(
+    path: str, checks: list[CheckResult], policy: dict[str, Any], manifest: str | None = None
+) -> VerifyReport:
     verdict, level = decide(checks, policy)
     return VerifyReport(
         path=path,
         tool=f"eguard {__version__}",
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        manifest=manifest,
         verdict=verdict,
         ral=level,
         exit_code=verdict.exit_code,

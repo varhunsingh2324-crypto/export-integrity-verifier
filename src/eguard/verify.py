@@ -92,4 +92,4 @@ def verify_file(
         l4 += check_reconcile(trusted, fp.tables, digest.info, max_examples, file_digest)
     checks += l4
     checks += l5_checks(sampler, policy, scratch_dsn, source_dsn)
-    return build_report(str(path), checks, policy)
+    return build_report(str(path), checks, policy, str(manifest) if manifest else None)
