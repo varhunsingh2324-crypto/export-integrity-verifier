@@ -63,26 +63,26 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–5 (skeleton, incident simulation, streaming core + L1 container,
-> L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened export, L5
-> restore drill). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
+> Implemented so far: phases 0–5 and phase 6 part A (skeleton, incident simulation, streaming core
+> + L1 container, L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened
+> export, L5 restore drill, verdict engine + `verify-all` matrix). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
 > manifest from the hardened export carries snapshot counts and the compressed sha256, so L4 can be
 > fully evidenced; any other manifest leaves those two checks SKIP. L5 needs a scratch database
 > (`SCRATCH_DSN` or `--scratch-dsn`); without one it is SKIP. Only a hardened export with a scratch
 > database can reach VERIFIED (RAL 5). A SUSPECT verdict lists the missing evidence.
-> `make faults` builds F1–F6 (needs the database).
-> `make verify-all`/`dashboard`/`demo` still exit non-zero with "not implemented yet" until their
-> phase lands.
+> `make faults` builds F0–F7 and F1h (needs the database). `make verify-all` prints the fault matrix.
+> The HTML report is phase 6 part B. `make dashboard`/`demo` still exit non-zero with "not
+> implemented yet" until phase 8.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
 make seed          # create the large table (configurable rows)
 make incident      # reproduce the incident: export v1, business change, export v2 (+30% rows, −20% size)
                    # (`python -m sim.incident run --scale 0.1` for a fast 30 000-row run)
-make faults        # fault gallery (F1–F6) from a 50 000-row variant; the source is a hardened
+make faults        # fault gallery (F0–F7, F1h) from a 50 000-row variant; F0 is a hardened
                    # export (`python -m sim.faults --only F4 --only F5`: rebuild some from the
                    # existing source and manifest, no database)
-make verify-all    # verify every export and print the scorecard
+make verify-all    # verify every export: fault × (gzip -t, L1–L5, verdict) matrix
 make dashboard     # open the Streamlit dashboard
 ```
 
@@ -94,10 +94,14 @@ eguard verify  data/exports/v3.sql.gz --manifest data/manifests/v3.manifest.json
 pg_dump … | eguard manifest-build --out m.json   # manifest from any dump stream (stdin)
 eguard manifest-seal m.json --compressed f.gz --snapshot ID --taken-at T --db-count s.t=N
 eguard verify  data/exports/v2.sql.gz --dsn $PG_DSN --seed 7   # + sample vs live table (drift)
+eguard verify-all data/exports --json                            # every export, worst exit code
 eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz      # size-anomaly forensics
 ```
 
 Exit codes: `0` VERIFIED · `1` SUSPECT · `2` CORRUPT · `3` tool error — so it drops straight into cron/CI/monitoring.
+Every `eguard` command keeps to them: a usage error, a crash or Ctrl-C exits 3 (Click alone would
+exit 2 or 1, which would read as CORRUPT or SUSPECT); `manifest-build` exits 2 on an incomplete
+dump; `verify-all` exits with its worst row.
 
 ### The simulated incident
 
@@ -285,7 +289,7 @@ A manifest without these fields leaves both checks SKIP, so L4 isn't fully evide
 | | exit | `gzip -t` | what is left | rows written (independent oracle) |
 |---|---|---|---|---|
 | `legacy_export.sh` | **0** | OK | `legacy_killed.sql.gz`, looks finished | 73,603 of 390,000, mid-COPY |
-| `export_with_manifest.sh` | **2** | – | only `*.sql.gz.FAILED` + `*.manifest.json.FAILED` | 165,353, mid-COPY; report: `pg_dump exit 124 <-- FAILED`, `manifest-build exit 1 <-- FAILED` |
+| `export_with_manifest.sh` | **2** | – | only `*.sql.gz.FAILED` + `*.manifest.json.FAILED` | 165,353, mid-COPY; report: `pg_dump exit 124 <-- FAILED`, `manifest-build exit 1 <-- FAILED` (exit 2 since phase 6, rule 7) |
 
 The kill point varies with timing, so the two runs stopped at different rows.
 
@@ -353,6 +357,48 @@ verdict:
   not be created.
 - F1, F2, F4, F5: the sampled rows restore and round-trip cleanly. F4/F5 change a single row,
   which a 2,995-row sample rarely includes; L4 is what catches them.
+
+### Verdict engine and fault matrix (phase 6 part A)
+
+`verdict.py` folds every check into one status per layer, then applies `config/policy.yaml`
+`verdict.corrupt_on_fail` (`[CRITICAL]`):
+
+- A layer is FAIL if any check FAILs, SKIP if nothing ran or everything SKIPped, WARN for a WARN or
+  for PASS mixed with SKIP (partial evidence), and PASS only if every check PASSed.
+- CORRUPT if a CRITICAL check FAILs; otherwise SUSPECT unless all five layers PASS; VERIFIED then.
+  RAL = layers that PASS.
+- `--json` carries `layers` (status, reason), `verdict`, `ral`, `exit_code`, every check and `reasons`.
+
+`make verify-all` verifies every `.gz`/`.Z` under `data/exports` (manifest from the gallery record,
+else `data/manifests/<name>.manifest.json`), runs `gzip -t` beside it, and writes
+`data/reports/verify_all.json`. Measured after `make faults` (L5 drill on, random seeds, 27.3 s):
+
+| export | fault | gzip -t | L1 | L2 | L3 | L4 | L5 | verdict (exit) |
+|---|---|---|---|---|---|---|---|---|
+| `fault_source/v2_hardened` | F0 | OK | PASS | PASS | PASS | PASS | PASS | **VERIFIED** (0), RAL 5 |
+| `F1_killed` (legacy) | F1 | **OK** | PASS | FAIL | WARN | SKIP | PASS | **CORRUPT** (2), RAL 2 |
+| `F1h_killed_hardened` | F1h | **OK** | PASS | FAIL | WARN | FAIL | PASS | **CORRUPT** (2), RAL 2 |
+| `F2_truncated` | F2 | FAIL | FAIL | FAIL | WARN | FAIL | PASS | **CORRUPT** (2), RAL 1 |
+| `F3_byteflip` | F3 | FAIL | FAIL | PASS | FAIL | FAIL | PASS | **CORRUPT** (2), RAL 2 |
+| `F4_bitflip.sql.Z` | F4 | **OK** | WARN | PASS | PASS | FAIL | PASS | **CORRUPT** (2), RAL 3 |
+| `F5_amount` | F5 | **OK** | PASS | PASS | PASS | FAIL | PASS | **CORRUPT** (2), RAL 4 |
+| `F6_dupchunk` | F6 | **OK** | PASS | PASS | FAIL | FAIL | FAIL | **CORRUPT** (2), RAL 2 |
+| `F7_gzip1` (gzip -1) | F7 | OK | PASS | PASS | PASS | PASS | PASS | **VERIFIED** (0), RAL 5 |
+| `v1`, `v2`, `fault_source/v1`, `v2` (legacy) | – | OK | PASS | PASS | PASS | SKIP | PASS | SUSPECT (1), RAL 4 |
+| `v3` (hardened) | – | OK | PASS | PASS | PASS | PASS | PASS | **VERIFIED** (0), RAL 5 |
+
+- L3 WARN on F1/F1h/F2: the dump was cut before `ALTER TABLE … PRIMARY KEY`, so `l3_pk_unique` is
+  SKIP while `l3_row_validity` PASSes.
+- F1 (legacy) has no manifest, so L4 has no reference: SKIP. F1h is the same kill in the hardened
+  pipeline; its manifest, built from the exporter's own stream, says the dump is incomplete.
+- F3 in this build: the flip damaged 1 row of 65,000, which the 2,995-row sample did not include,
+  so L5 PASSes (L5 promises ≥0.1 % damage at 95 %). Another build garbled 24,786 rows and L5 FAILed.
+  pg_dump's random `\restrict` key changes the compressed bytes every build.
+
+`tests/test_fault_matrix.py` (database) builds the whole gallery with the real generators and pins
+gzip -t, every layer and the verdict, except F3/F4's L3/L5, which must instead agree with L4 and
+with each other. Its rename test copies every file and manifest to random names, directories and
+extensions and gets identical verdicts, layers and evidence (rule 9).
 
 ## Documentation
 

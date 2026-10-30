@@ -15,7 +15,7 @@ from eguard.rows import RowValidator, check_rows
 from eguard.sampler import ReservoirSampler, sample_size
 from eguard.stream import Consumer, FanOut, open_decoder
 from eguard.structure import check_structure
-from eguard.verdict import decide, explain
+from eguard.verdict import build_report
 
 
 class StreamStats(Consumer):
@@ -92,7 +92,4 @@ def verify_file(
         l4 += check_reconcile(trusted, fp.tables, digest.info, max_examples, file_digest)
     checks += l4
     checks += l5_checks(sampler, policy, scratch_dsn, source_dsn)
-    verdict, level = decide(checks)
-    return VerifyReport(
-        path=str(path), verdict=verdict, ral=level, checks=checks, reasons=explain(checks, verdict)
-    )
+    return build_report(str(path), checks, policy)

@@ -179,15 +179,21 @@ currency char(3), status text, channel text, merchant_code text, remarks text, m
 | ID | Fault | How it is produced | Expected result |
 |---|---|---|---|
 | F0 | None (v2 itself) | legacy pipeline | VERIFIED (forensic: SUSPECT→VERIFIED with source counts) |
-| F1 | Exporter killed mid-stream, gzip finishes cleanly | `timeout` / `pg_terminate_backend` on `pg_dump` inside `pg_dump \| gzip` | **`gzip -t` = OK**, L2 + L4 = **CORRUPT** |
+| F1 | Exporter killed mid-stream, gzip finishes cleanly | `timeout` / `pg_terminate_backend` on `pg_dump` inside `pg_dump \| gzip` | **`gzip -t` = OK**, L2 = **CORRUPT**; L4 SKIP (corrected in phase 6: a legacy export has no manifest, so L4 has nothing to reconcile against, and forensic `count(*)` cannot prove loss without a baseline from export time) |
+| F1h | The same kill inside the hardened pipeline | `EXPORT_DUMP_TIMEOUT` on `export_with_manifest.sh`; its `.FAILED` files kept | **`gzip -t` = OK**, L2 + L4 = **CORRUPT** (the manifest records `dump_complete = false`) |
 | F2 | File truncated at rest (disk full, copy interrupted) | `head -c 70%` of the `.gz` | L1 CORRUPT (unexpected EOF) |
 | F3 | Single bit flip in a gzip file | flip one byte mid-file | L1 CORRUPT (CRC / inflate error) |
 | F4 | Single bit flip in a `.Z` file | `compress` export, flip one byte | **L1 cannot detect**; L3/L4 CORRUPT |
 | F5 | Silent value corruption, valid container | decompress → alter one amount → recompress | L1–L3 pass; **L4 fingerprint CORRUPT, chunk localised** |
 | F6 | Duplicated chunk (bad retry/append) | repeat 10 000 COPY lines | L3 PK duplicate → CORRUPT |
-| F7 | Compressor change only | same data, `gzip -1` vs `gzip -9` / `compress` vs `gzip` | VERIFIED; `explain` attributes size change to H1 |
+| F7 | Compressor change only | same table re-exported by the hardened pipeline with `gzip -1` instead of `pigz -6` (own manifest) | VERIFIED; `explain` attributes size change to H1 |
 
 The **defence-in-depth matrix** (fault × layer, ✔ = caught) is the centrepiece of the demo.
+
+F3 and F4 flip one byte at a fixed offset, but pg_dump's random `\restrict` key makes every build's
+compressed bytes different, so how many rows the flip damages varies (measured: 24,786 in one build,
+1 in another). `tests/test_fault_matrix.py` therefore pins L1, L2, L4 and the verdict for them, and
+lets L3/L5 PASS or FAIL as long as they agree with L4 and with each other.
 
 ---
 

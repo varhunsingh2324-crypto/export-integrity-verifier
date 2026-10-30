@@ -40,7 +40,7 @@ seed: $(STAMP)
 incident: $(STAMP)
 	$(PY) -m sim.incident run
 
-faults: $(STAMP)                # F1-F6 from a hardened-export source (DB: make up; MANIFEST_HMAC_KEY); F7 later
+faults: $(STAMP)                # F0-F7 + F1h from a 50k-row incident (DB: make up; MANIFEST_HMAC_KEY)
 	$(PY) -m sim.faults
 
 clean-data:                     # delete regenerable data (rebuild: make incident faults)
@@ -54,8 +54,11 @@ disk:                           # disk budget check: ~1.5 GB for the whole proje
 bench: $(STAMP)                 # L1 streaming memory/throughput so far (full bench: phase 8)
 	$(PY) bench/l1_memory.py
 
+# Matrix of every export: fault x (gzip -t, L1-L5, verdict). eguard exits with the worst verdict
+# (rule 7); make itself fails only on a tool error (3), since the fault gallery is CORRUPT by design.
+verify-all: $(STAMP)
+	$(VENV)/bin/eguard verify-all data/exports --out data/reports/verify_all.json || [ $$? -le 2 ]
+
 # Stubs: fail loudly until their phase lands, so a stub never looks like success.
-verify-all:
-	@echo "make $@: not implemented yet (phase 6)" >&2; exit 1
 dashboard demo:
 	@echo "make $@: not implemented yet (phase 8)" >&2; exit 1

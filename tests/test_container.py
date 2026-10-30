@@ -63,7 +63,7 @@ def test_truncated_gzip_fails_stream_end(tmp_path: Path) -> None:
     assert checks["l1_stream_end"].status == Status.FAIL
     assert checks["l1_stream_end"].evidence["error"] == "unexpected_eof"
     assert checks["l1_integrity"].status == Status.SKIP
-    assert decide(list(checks.values()))[0] == Verdict.CORRUPT
+    assert decide(list(checks.values()), POLICY)[0] == Verdict.CORRUPT
 
 
 def test_byte_flip_fails(tmp_path: Path) -> None:
@@ -71,7 +71,7 @@ def test_byte_flip_fails(tmp_path: Path) -> None:
     checks, _ = _l1(tmp_path, _flip(blob, len(blob) // 2))
     failed = {n for n, s in _statuses(checks).items() if s == Status.FAIL}
     assert failed & {"l1_stream_end", "l1_integrity"}
-    assert decide(list(checks.values()))[0] == Verdict.CORRUPT
+    assert decide(list(checks.values()), POLICY)[0] == Verdict.CORRUPT
 
 
 def test_crc_mismatch_message(tmp_path: Path) -> None:
@@ -97,7 +97,7 @@ def test_trailing_junk_is_policy_status(tmp_path: Path, junk: bytes) -> None:
     c = checks["l1_trailing"]
     assert c.status == Status(POLICY["l1"]["trailing_garbage"])
     assert c.evidence["trailing_bytes"] == len(junk)
-    assert decide(list(checks.values()))[0] != Verdict.CORRUPT
+    assert decide(list(checks.values()), POLICY)[0] != Verdict.CORRUPT
 
 
 def test_bad_header_fails(tmp_path: Path) -> None:
@@ -126,7 +126,7 @@ def test_dotz_decodes_with_no_checksum_warning(tmp_path: Path) -> None:
     assert checks["l1_checksum"].status == Status.WARN
     assert checks["l1_checksum"].message == NO_CHECKSUM
     assert checks["l1_format"].evidence["compressor"] == "compress (LZW)"
-    assert decide(list(checks.values()))[0] == Verdict.SUSPECT
+    assert decide(list(checks.values()), POLICY)[0] == Verdict.SUSPECT
 
 
 @needs_compress

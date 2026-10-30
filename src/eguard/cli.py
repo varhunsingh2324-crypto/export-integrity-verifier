@@ -10,14 +10,46 @@ from typing import Annotated, Any
 import typer
 from rich.console import Console
 from rich.table import Table
+from typer.core import TyperGroup
 
 from eguard import __version__
 from eguard.config import load_policy
 from eguard.models import Status, Verdict, VerifyReport
 
-app = typer.Typer(help="ExportGuard: verify compressed database exports without re-importing.")
 console = Console()
 err = Console(stderr=True)
+
+
+class _Group(TyperGroup):
+    """Rule 7 on every command: 0-2 are verdicts, so anything that is not one exits 3. Click would
+    exit 2 (= CORRUPT) on a usage error and 1 (= SUSPECT) on a crash or Ctrl-C."""
+
+    def make_context(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return super().make_context(*args, **kwargs)
+        except typer.TyperException as exc:  # usage errors before the subcommand
+            exc.exit_code = Verdict.TOOL_ERROR.exit_code
+            raise
+
+    def invoke(self, ctx: Any) -> Any:
+        try:
+            return super().invoke(ctx)
+        except typer.Exit:
+            raise
+        except typer.TyperException as exc:  # usage errors, BadParameter, unknown command
+            exc.exit_code = Verdict.TOOL_ERROR.exit_code
+            raise
+        except (typer.Abort, KeyboardInterrupt, EOFError) as exc:
+            err.print("[red]tool error:[/] interrupted")
+            raise typer.Exit(Verdict.TOOL_ERROR.exit_code) from exc
+        except Exception as exc:
+            err.print_exception()
+            raise typer.Exit(Verdict.TOOL_ERROR.exit_code) from exc
+
+
+app = typer.Typer(
+    cls=_Group, help="ExportGuard: verify compressed database exports without re-importing."
+)
 
 TOOLS = ("gzip", "pigz", "compress")
 
@@ -98,6 +130,10 @@ def _print_report(report: VerifyReport) -> None:
         style = STATUS_STYLE[c.status]
         table.add_row(f"L{c.layer}", c.name, f"[{style}]{c.status}[/]", c.message)
     console.print(table)
+    layers = " · ".join(
+        f"L{lr.layer} [{STATUS_STYLE[lr.status]}]{lr.status}[/]" for lr in report.layers
+    )
+    console.print(f"layers: {layers}")
     for c in report.checks:
         for statement in c.evidence.get("confidence_statements", []):
             console.print(f"[bold]confidence:[/] {statement}")
@@ -112,7 +148,9 @@ def _print_report(report: VerifyReport) -> None:
 
 def _tool_error(path: str, exc: Exception, as_json: bool) -> typer.Exit:
     if as_json:
-        typer.echo(json.dumps({"path": path, "verdict": "TOOL_ERROR", "error": str(exc)}))
+        code = Verdict.TOOL_ERROR.exit_code
+        body = {"path": path, "verdict": "TOOL_ERROR", "exit_code": code, "error": str(exc)}
+        typer.echo(json.dumps(body))
     else:
         console.print(f"[red]tool error:[/] {exc}")
     return typer.Exit(Verdict.TOOL_ERROR.exit_code)
@@ -171,7 +209,7 @@ def manifest_build(
 ) -> None:
     """Read a decompressed dump from stdin (e.g. behind `tee`) and write a signed manifest.
 
-    Exit: 0 manifest written; 1 written, but the dump is incomplete; 3 tool error."""
+    Exit: 0 manifest written; 2 written, but the dump is incomplete (CORRUPT); 3 tool error."""
     from eguard.manifest import PLACEHOLDER_KEY, ManifestError, build_from_chunks, hmac_key_from_env
     from eguard.manifest import save as save_manifest
     from eguard.stream import LineTooLong
@@ -199,7 +237,7 @@ def manifest_build(
     )
     if not m.dump_complete:
         err.print("[red]dump incomplete:[/] no completion marker or an unclosed COPY block")
-        raise typer.Exit(1)
+        raise typer.Exit(Verdict.CORRUPT.exit_code)
 
 
 def _db_counts(pairs: list[str]) -> dict[str, int]:
@@ -268,4 +306,79 @@ def export(
         err.print(f"[red]tool error:[/] {EXPORT_SCRIPT} not found")
         raise typer.Exit(Verdict.TOOL_ERROR.exit_code)
     cmd = [str(EXPORT_SCRIPT), *(["-m", str(manifest)] if manifest else []), str(out), *table]
-    raise typer.Exit(subprocess.run(cmd).returncode)
+    code = subprocess.run(cmd).returncode
+    if code not in range(4):  # e.g. the script was killed by a signal: outcome unknown
+        err.print(f"[red]tool error:[/] export script exited {code}")
+        code = Verdict.TOOL_ERROR.exit_code
+    raise typer.Exit(code)
+
+
+DATA = Path(__file__).resolve().parents[2] / "data"
+
+
+def _gzip_t_cell(code: int | None) -> str:
+    if code is None:
+        return "[dim]n/a[/]"
+    return "[green]OK[/]" if code == 0 else f"[red]FAIL ({code})[/]"
+
+
+def _print_matrix(rows: list[Any], root: Path) -> None:
+    table = Table(title=f"eguard verify-all {root}")
+    for column in ("export", "fault", "gzip -t", "L1", "L2", "L3", "L4", "L5", "verdict", "exit"):
+        table.add_column(column)
+    for r in rows:
+        name = str(Path(r.path).relative_to(root)) if Path(r.path).is_relative_to(root) else r.path
+        if r.report is None:
+            cells = ["–"] * 5 + [f"[red]TOOL_ERROR[/]: {r.error}"]
+        else:
+            cells = [f"[{STATUS_STYLE[lr.status]}]{lr.status}[/]" for lr in r.report.layers]
+            style = VERDICT_STYLE.get(r.report.verdict, "red")
+            cells.append(f"[{style}]{r.report.verdict}[/] (RAL {r.report.ral})")
+        table.add_row(name, r.label, _gzip_t_cell(r.gzip_t), *cells, str(r.exit_code))
+    console.print(table)
+
+
+@app.command("verify-all")
+def verify_all(
+    root: Annotated[Path, typer.Argument(help="Directory of exports (searched recursively).")] = (
+        DATA / "exports"
+    ),
+    gallery: Annotated[
+        Path, typer.Option(help="Fault gallery record: fault IDs and their manifests.")
+    ] = DATA / "reports" / "faults.json",
+    manifests: Annotated[
+        Path, typer.Option(help="Default manifest per export: <dir>/<name>.manifest.json.")
+    ] = DATA / "manifests",
+    scratch_dsn: Annotated[
+        str | None,
+        typer.Option(envvar="SCRATCH_DSN", help="Database for the L5 sampled restore drill."),
+    ] = None,
+    seed: Annotated[int | None, typer.Option(help="L5 sample seed (default: random).")] = None,
+    out: Annotated[Path | None, typer.Option(help="Also write the JSON matrix here.")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Verify every .gz/.Z export under ROOT; print fault × (gzip -t, L1-L5, verdict).
+
+    Exit: the worst row (3 tool error > 2 CORRUPT > 1 SUSPECT > 0 VERIFIED); 3 if none found."""
+    from eguard.matrix import discover, gallery_records, pairing, verify_one, worst_exit
+
+    policy = load_policy()
+    known = gallery_records(gallery)
+    rows = []
+    for path in discover(root):
+        label, manifest = pairing(path, known, manifests)
+        rows.append(
+            verify_one(path, label, manifest, policy, scratch_dsn=scratch_dsn or None, seed=seed)
+        )
+    code = worst_exit(rows)
+    body = {"root": str(root), "exit_code": code, "rows": [r.model_dump(mode="json") for r in rows]}
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(body, indent=2) + "\n")
+    if as_json:
+        typer.echo(json.dumps(body, indent=2))
+    elif rows:
+        _print_matrix(rows, root)
+    else:
+        err.print(f"[red]tool error:[/] no .gz/.Z exports under {root}")
+    raise typer.Exit(code)

@@ -29,6 +29,12 @@ l5:
   statement_timeout_ms: 30000
   max_examples: 20           # rejected / mismatched / drift rows kept as evidence
 
+verdict:
+  # IMPLEMENTATION_PLAN §4 verdict engine. A FAIL of a check with one of these severities makes the
+  # export CORRUPT. Any other non-PASS result (a lesser FAIL, WARN, SKIP, a layer that ran no check)
+  # means evidence is missing or approximate: SUSPECT. RAL = layers whose checks all PASS.
+  corrupt_on_fail: [CRITICAL]
+
 exit_codes:
   VERIFIED: 0
   SUSPECT: 1

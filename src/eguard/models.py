@@ -102,10 +102,24 @@ class ContainerInfo(BaseModel):
     decoder_stderr: str | None = None
 
 
+class LayerResult(BaseModel):
+    """One layer's checks folded into a single status (verdict.layer_results)."""
+
+    layer: int = Field(ge=1, le=5)
+    name: str  # container, structure, rows, reconciliation, restore drill
+    status: Status  # FAIL > WARN (incl. PASS+SKIP mixed) > SKIP (nothing ran) > PASS
+    full_evidence: bool  # every check PASSed: the layer counts toward the RAL
+    checks: int
+    reason: str
+
+
 class VerifyReport(BaseModel):
     path: str
+    tool: str = ""  # eguard version that produced the report
     verdict: Verdict
     ral: int = Field(ge=0, le=5)
+    exit_code: int = 0  # rule 7
+    layers: list[LayerResult] = Field(default_factory=list)
     checks: list[CheckResult]
     reasons: list[str] = Field(default_factory=list)  # why not VERIFIED (verdict.explain)
 

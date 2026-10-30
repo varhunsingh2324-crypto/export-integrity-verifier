@@ -130,12 +130,12 @@ def test_cli_manifest_build_to_stdout(manifest: Manifest) -> None:
     assert m.tables == manifest.tables and signature_ok(m, KEY)
 
 
-def test_cli_manifest_build_incomplete_dump_exits_1(tmp_path: Path) -> None:
+def test_cli_manifest_build_incomplete_dump_exits_2(tmp_path: Path) -> None:
     out = tmp_path / "k.json"
     result = runner.invoke(
         app, ["manifest-build", "--out", str(out)], input=pgdump.killed_at(300, 120), env=ENV
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 2  # rule 7: an incomplete dump is CORRUPT
     m = load(out)
     assert isinstance(m, Manifest) and not m.dump_complete and m.tables[0].count == 120
     assert "incomplete" in result.stderr

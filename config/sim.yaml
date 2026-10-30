@@ -42,8 +42,9 @@ targets:
   size_change: {value: -0.20, tolerance: 0.03}
 
 # Fault-injection gallery (IMPLEMENTATION_PLAN.md §6). Disk budget (rule 10): faults never come
-# from the full dataset. `make faults` reruns the incident at source_rows in its own schema, F1 dumps
-# that live (v2-state) table, the rest derive from its v2.sql.gz; the schema is then dropped.
+# from the full dataset. `make faults` reruns the incident at source_rows in its own schema, exports
+# its v2 state with the hardened script (F0); F1/F1h/F7 dump that live table again, F2-F6 derive
+# from F0's bytes; the schema is then dropped.
 faults:
   source_rows: 50000
   schema: eguard_faults
@@ -53,3 +54,4 @@ faults:
   f4: {offset_fraction: 0.5, xor_mask: 1}   # `compress` the dump, then XOR one byte mid-file
   f5: {row: 33333, column: amount, delta: "1.00"}  # one value changed, re-gzipped (valid container)
   f6: {start_row: 10001, rows: 10000}       # rows 10001-20000 of the COPY block sent twice
+  f7: {compressor: gzip, level: 1}          # same table re-exported (hardened) with gzip -1, not pigz -6

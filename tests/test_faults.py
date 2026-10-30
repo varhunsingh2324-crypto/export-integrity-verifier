@@ -1,6 +1,5 @@
 import gzip
 import os
-import secrets
 import shutil
 import subprocess
 from decimal import Decimal
@@ -29,6 +28,7 @@ from sim.faults import (
 )
 from tests import pgdump
 from tests.gzutil import member
+from tests.rename import decoy, signature
 
 POLICY = load_policy()
 CFG = load_faults_config()
@@ -265,17 +265,6 @@ def test_dump_outcome_oracle(tmp_path: Path) -> None:
         assert dump_outcome(gzip_cli(data, tmp_path / f"{kind}.gz"))["outcome"] == kind
 
 
-def _signature(report: VerifyReport) -> tuple:
-    return report.verdict, report.ral, [(c.name, c.status, c.evidence) for c in report.checks]
-
-
-def _decoy(tmp_path: Path, path: Path) -> Path:
-    decoy = tmp_path / secrets.token_hex(4) / f"{secrets.token_hex(6)}.{secrets.token_hex(2)}"
-    decoy.parent.mkdir()
-    shutil.copyfile(path, decoy)
-    return decoy
-
-
 def test_verdicts_ignore_file_names(
     tmp_path: Path,
     gallery: dict[str, Path],
@@ -285,9 +274,9 @@ def test_verdicts_ignore_file_names(
     """Rule 9: renaming every file (and the manifest) to random names/dirs/extensions
     changes nothing."""
     for fid, path in gallery.items():
-        manifest, key = _manifest_for(fid, _decoy(tmp_path, source_manifest))
-        report = verify_file(_decoy(tmp_path, path), POLICY, manifest, key, seed=SEED)
-        assert _signature(report) == _signature(reports[fid]), fid
+        manifest, key = _manifest_for(fid, decoy(tmp_path, source_manifest))
+        report = verify_file(decoy(tmp_path, path), POLICY, manifest, key, seed=SEED)
+        assert signature(report) == signature(reports[fid]), fid
 
 
 @pytest.mark.db

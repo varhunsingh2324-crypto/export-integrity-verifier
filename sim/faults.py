@@ -75,6 +75,11 @@ class F6Config(BaseModel):
     rows: int = Field(ge=1)
 
 
+class F7Config(BaseModel):
+    compressor: str = Field(min_length=1)  # EXPORT_COMPRESSOR of the hardened script
+    level: int = Field(ge=1, le=9)
+
+
 class FaultsConfig(BaseModel):
     source_rows: int = Field(gt=0)  # v1 rows of the small incident variant every fault comes from
     schema_: str = Field(alias="schema")
@@ -84,6 +89,7 @@ class FaultsConfig(BaseModel):
     f4: F4Config
     f5: F5Config
     f6: F6Config
+    f7: F7Config
 
 
 def load_faults_config(path: Path = DEFAULT_SIM) -> FaultsConfig:
@@ -230,30 +236,23 @@ def _gzip_t(path: Path) -> int:
     return subprocess.run(["gzip", "-t", str(path)], capture_output=True).returncode
 
 
-def make_f1(qualified_table: str, dst: Path, cfg: F1Config) -> dict[str, Any]:
-    """F1: pg_dump killed by `timeout` inside the naive `pg_dump | gzip` pipe.
+Attempt = Callable[[float], tuple[int, Path]]  # timeout -> (script exit, file it wrote)
 
-    Timing decides where the kill lands, so each attempt is checked by `dump_outcome` and the
-    timeout is bisected until pg_dump died inside the COPY data. Every attempt is recorded.
+
+def _bisect_kill(attempt: Attempt, cfg: F1Config) -> dict[str, Any]:
+    """Timing decides where a `timeout` kill lands, so each attempt is checked by `dump_outcome`
+    and the timeout is bisected until pg_dump died inside the COPY data. Every attempt is recorded.
     """
-    dst.parent.mkdir(parents=True, exist_ok=True)
     lo, hi, t = 0.0, float("inf"), cfg.timeout_seconds
     attempts: list[dict[str, Any]] = []
     for _ in range(cfg.max_attempts):
-        env = os.environ | {"LEGACY_DUMP_TIMEOUT": f"{t:.3f}"}
-        proc = subprocess.run(
-            [str(LEGACY_EXPORT), qualified_table, str(dst)], env=env, capture_output=True, cwd=ROOT
-        )
-        outcome = dump_outcome(dst)
-        attempts.append({"timeout_seconds": round(t, 3), "script_exit": proc.returncode} | outcome)
+        code, written = attempt(t)
+        outcome = dump_outcome(written)
+        attempts.append({"timeout_seconds": round(t, 3), "script_exit": code} | outcome)
         if outcome["outcome"] == "mid_copy":
             return {
-                "fault": "F1",
-                "table": qualified_table,
-                "path": str(dst),
                 "timeout_seconds": round(t, 3),
-                "script_exit": proc.returncode,
-                "gzip_t_exit": _gzip_t(dst),
+                "script_exit": code,
                 "complete_rows_written": outcome["complete_rows_written"],
                 "attempts": attempts,
             }
@@ -263,7 +262,53 @@ def make_f1(qualified_table: str, dst: Path, cfg: F1Config) -> dict[str, Any]:
         else:
             lo = t
             t = t * 2 if hi == float("inf") else (t + hi) / 2
-    raise RuntimeError(f"F1: pg_dump never killed mid-COPY in {cfg.max_attempts} tries: {attempts}")
+    raise RuntimeError(f"pg_dump never killed mid-COPY in {cfg.max_attempts} tries: {attempts}")
+
+
+def make_f1(qualified_table: str, dst: Path, cfg: F1Config) -> dict[str, Any]:
+    """F1: pg_dump killed by `timeout` inside the naive `pg_dump | gzip` pipe (no manifest)."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    def attempt(t: float) -> tuple[int, Path]:
+        env = os.environ | {"LEGACY_DUMP_TIMEOUT": f"{t:.3f}"}
+        proc = subprocess.run(
+            [str(LEGACY_EXPORT), qualified_table, str(dst)], env=env, capture_output=True, cwd=ROOT
+        )
+        return proc.returncode, dst
+
+    kill = _bisect_kill(attempt, cfg)
+    record = {"fault": "F1", "table": qualified_table, "path": str(dst), "manifest": None}
+    return record | kill | {"gzip_t_exit": _gzip_t(dst)}
+
+
+def _failed(path: Path) -> Path:
+    return path.with_name(path.name + ".FAILED")
+
+
+def make_f1h(qualified_table: str, dst: Path, manifest: Path, cfg: F1Config) -> dict[str, Any]:
+    """F1h: the same `timeout` kill, inside scripts/export_with_manifest.sh. The script exits 2 and
+    quarantines both files as .FAILED; they are kept under gallery names so the matrix can show
+    that the manifest (written from the exporter's own stream) records the dump as incomplete."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    def attempt(t: float) -> tuple[int, Path]:
+        for f in (dst, _failed(dst), manifest, _failed(manifest)):
+            f.unlink(missing_ok=True)
+        env = os.environ | {"EXPORT_DUMP_TIMEOUT": f"{t:.3f}"}
+        cmd = [str(HARDENED_EXPORT), "-m", str(manifest), str(dst), qualified_table]
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=ROOT)
+        written = _failed(dst) if _failed(dst).exists() else dst
+        if not written.exists():
+            raise RuntimeError(f"F1h: no output (exit {proc.returncode}): {proc.stderr[-2000:]}")
+        return proc.returncode, written
+
+    kill = _bisect_kill(attempt, cfg)
+    if kill["script_exit"] != 2 or not _failed(manifest).exists():
+        raise RuntimeError(f"F1h: killed export did not fail as expected: {kill}")
+    _failed(dst).replace(dst)
+    _failed(manifest).replace(manifest)
+    record = {"fault": "F1h", "table": qualified_table, "path": str(dst), "manifest": str(manifest)}
+    return record | kill | {"gzip_t_exit": _gzip_t(dst)}
 
 
 def make_f6(src: Path, dst: Path, cfg: F6Config) -> dict[str, Any]:
@@ -308,11 +353,15 @@ def make_f6(src: Path, dst: Path, cfg: F6Config) -> dict[str, Any]:
     }
 
 
-# Faults derived from the hardened export of the source (v2 state); they are verified against the
-# manifest that export wrote. F1 is a separate, killed legacy pg_dump run (no manifest by design).
+# F0 is the hardened export of the source (v2 state). F2-F6 are derived from its bytes and verified
+# against its manifest. F1 is a killed legacy pg_dump run (no manifest by design); F1h is the same
+# kill inside the hardened script (its own, incomplete manifest); F7 is the same table exported
+# again by the hardened script with another compressor (its own manifest).
 FROM_SOURCE = ("F2", "F3", "F4", "F5", "F6")
 SOURCE_NAME = "v2_hardened.sql.gz"
 SOURCE_MANIFEST = "fault_source_v2.manifest.json"
+F1H_MANIFEST = "F1h.manifest.json"
+F7_MANIFEST = "F7.manifest.json"
 HARDENED_EXPORT = ROOT / "scripts" / "export_with_manifest.sh"
 
 
@@ -330,49 +379,95 @@ def manifest_summary(path: Path) -> dict[str, Any]:
     }
 
 
-def hardened_source(table: str, out: Path, manifest: Path) -> dict[str, Any]:
-    """Export the source with scripts/export_with_manifest.sh, so its manifest carries snapshot
-    counts and the compressed sha256. Exit 1 (SUSPECT: L5 pending) is the healthy result for now."""
+def hardened_export(
+    table: str, out: Path, manifest: Path, env: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """Export with scripts/export_with_manifest.sh, so the manifest carries snapshot counts and the
+    compressed sha256. Exit 0 (VERIFIED, L5 ran) or 1 (SUSPECT, no SCRATCH_DSN) is healthy."""
     proc = subprocess.run(
         [str(HARDENED_EXPORT), "-m", str(manifest), str(out), table],
         capture_output=True,
         text=True,
         cwd=ROOT,
+        env=os.environ | (env or {}),
     )
     if proc.returncode not in (0, 1):
         raise RuntimeError(f"hardened export exited {proc.returncode}: {proc.stderr[-2000:]}")
     return manifest_summary(manifest) | {"source": str(out), "export_exit": proc.returncode}
 
 
-Maker = Callable[[], dict[str, Any]]
-
-
-def _makers(cfg: FaultsConfig, source: Path, out_dir: Path, table: str) -> dict[str, Maker]:
+def make_f7(qualified_table: str, dst: Path, manifest: Path, cfg: F7Config) -> dict[str, Any]:
+    """F7: compressor change only. The unchanged source table is exported again by the hardened
+    script with `cfg.compressor -cfg.level` instead of pigz -6, with its own sealed manifest."""
+    env = {"EXPORT_COMPRESSOR": cfg.compressor, "PIGZ_LEVEL": str(cfg.level)}
+    summary = hardened_export(qualified_table, dst, manifest, env)
     return {
-        "F1": lambda: make_f1(table, out_dir / "F1_killed.sql.gz", cfg.f1),
-        "F2": lambda: make_f2(source, out_dir / "F2_truncated.sql.gz", cfg.f2),
-        "F3": lambda: make_f3(source, out_dir / "F3_byteflip.sql.gz", cfg.f3),
-        "F4": lambda: make_f4(source, out_dir / "F4_bitflip.sql.Z", cfg.f4),
-        "F5": lambda: make_f5(source, out_dir / "F5_amount.sql.gz", cfg.f5),
-        "F6": lambda: make_f6(source, out_dir / "F6_dupchunk.sql.gz", cfg.f6),
+        "fault": "F7",
+        "table": qualified_table,
+        "path": str(dst),
+        "manifest": str(manifest),
+        "compressor": f"{cfg.compressor} -{cfg.level}",
+        "rows": summary["rows"],
+        "compressed": summary["compressed"],
+        "export_exit": summary["export_exit"],
+        "gzip_t_exit": _gzip_t(dst),
     }
 
 
-def _with_incident(
-    cfg: FaultsConfig, sim: SimConfig, src_dir: Path, manifest: Path, makers: dict[str, Maker]
+Maker = Callable[[], dict[str, Any]]
+
+
+def _source_paths(out_dir: Path, manifest_dir: Path) -> tuple[Path, Path]:
+    return out_dir / "fault_source" / SOURCE_NAME, manifest_dir / SOURCE_MANIFEST
+
+
+def _makers(cfg: FaultsConfig, out_dir: Path, manifest_dir: Path, table: str) -> dict[str, Maker]:
+    source, source_manifest = _source_paths(out_dir, manifest_dir)
+
+    def derived(record: dict[str, Any]) -> dict[str, Any]:
+        return record | {"manifest": str(source_manifest)}
+
+    return {
+        "F1": lambda: make_f1(table, out_dir / "F1_killed.sql.gz", cfg.f1),
+        "F1h": lambda: make_f1h(
+            table, out_dir / "F1h_killed_hardened.sql.gz", manifest_dir / F1H_MANIFEST, cfg.f1
+        ),
+        "F2": lambda: derived(make_f2(source, out_dir / "F2_truncated.sql.gz", cfg.f2)),
+        "F3": lambda: derived(make_f3(source, out_dir / "F3_byteflip.sql.gz", cfg.f3)),
+        "F4": lambda: derived(make_f4(source, out_dir / "F4_bitflip.sql.Z", cfg.f4)),
+        "F5": lambda: derived(make_f5(source, out_dir / "F5_amount.sql.gz", cfg.f5)),
+        "F6": lambda: derived(make_f6(source, out_dir / "F6_dupchunk.sql.gz", cfg.f6)),
+        "F7": lambda: make_f7(
+            table, out_dir / "F7_gzip1.sql.gz", manifest_dir / F7_MANIFEST, cfg.f7
+        ),
+    }
+
+
+def build_gallery(
+    cfg: FaultsConfig, sim: SimConfig, out_dir: Path, manifest_dir: Path, schema: str
 ) -> tuple[IncidentResult, dict[str, Any], list[dict[str, Any]]]:
-    """Run the incident at `faults.source_rows` in its own schema, export its v2 state with the
-    hardened script, build every fault, drop the schema."""
+    """Run the incident at `faults.source_rows` in `schema`, export its v2 state with the hardened
+    script (F0), build F1-F7, drop the schema. Every record names its manifest (None for F1)."""
     scale = cfg.source_rows / sim.base_rows
     if scaled_rows(sim, scale) != cfg.source_rows:
         raise typer.BadParameter(f"source_rows {cfg.source_rows} not reachable from base_rows")
-    table = f"{cfg.schema_}.{sim.table}"
+    table = f"{schema}.{sim.table}"
+    source, source_manifest = _source_paths(out_dir, manifest_dir)
+    makers = _makers(cfg, out_dir, manifest_dir, table)
     try:
-        incident = run_incident(sim, scale, cfg.schema_, src_dir)
-        summary = hardened_source(table, src_dir / SOURCE_NAME, manifest)
-        return incident, summary, [make() for make in makers.values()]
+        incident = run_incident(sim, scale, schema, source.parent)
+        summary = hardened_export(table, source, source_manifest)
+        f0 = {
+            "fault": "F0",
+            "table": table,
+            "path": str(source),
+            "manifest": str(source_manifest),
+            "export_exit": summary["export_exit"],
+            "gzip_t_exit": _gzip_t(source),
+        }
+        return incident, summary, [f0, *(make() for make in makers.values())]
     finally:
-        drop_schema(cfg.schema_)
+        drop_schema(schema)
 
 
 def _report_body(
@@ -384,9 +479,6 @@ def _report_body(
     """New records replace same-ID ones; with --only (no incident) the others are kept."""
     old = json.loads(report.read_text()) if incident is None and report.exists() else {}
     by_id = {r["fault"]: r for r in old.get("faults", [])} | {r["fault"]: r for r in records}
-    for fid, r in by_id.items():
-        if fid in FROM_SOURCE:
-            r["manifest"] = manifest["path"]
     return {
         "source": incident.model_dump(mode="json") if incident else old.get("source"),
         "source_manifest": manifest,
@@ -409,23 +501,22 @@ def build(
     ] = None,
 ) -> None:
     """Without --only: run the incident at `faults.source_rows` in its own schema (dropped after),
-    export its v2 state with the hardened script (source + signed manifest with snapshot counts),
-    and build F1-F6; needs the database and MANIFEST_HMAC_KEY. F7 lands with phase 7."""
+    export its v2 state with the hardened script (F0: source + signed manifest with snapshot
+    counts) and build F1-F7; needs the database and MANIFEST_HMAC_KEY."""
     cfg, sim = load_faults_config(), load_sim_config()
     hmac_key_from_env()  # fail before the slow part, not after it
-    src_dir = out_dir / "fault_source"
-    source, manifest_path = src_dir / SOURCE_NAME, manifest_dir / SOURCE_MANIFEST
-    makers = _makers(cfg, source, out_dir, f"{cfg.schema_}.{sim.table}")
+    source, manifest_path = _source_paths(out_dir, manifest_dir)
     incident = None
     if only:
         if bad := sorted(set(only) - set(FROM_SOURCE)):
             raise typer.BadParameter(f"--only takes {', '.join(FROM_SOURCE)}, not {bad}")
         if not (source.exists() and manifest_path.exists()):
             raise typer.BadParameter(f"{source} or its manifest missing: run `make faults` first")
+        makers = _makers(cfg, out_dir, manifest_dir, f"{cfg.schema_}.{sim.table}")
         records = [makers[f]() for f in sorted(set(only))]
         manifest = manifest_summary(manifest_path) | {"source": str(source)}
     else:
-        incident, manifest, records = _with_incident(cfg, sim, src_dir, manifest_path, makers)
+        incident, manifest, records = build_gallery(cfg, sim, out_dir, manifest_dir, cfg.schema_)
     body = _report_body(report, incident, manifest, records)
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(body, indent=2, default=str) + "\n")
