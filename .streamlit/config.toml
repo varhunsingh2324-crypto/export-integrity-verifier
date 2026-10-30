@@ -1,0 +1,16 @@
+# ExportGuard dashboard (make dashboard). No external network calls: no usage stats, no deploy
+# button (it links to Streamlit Cloud); everything the page needs ships with streamlit itself.
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+maxUploadSize = 200   # MB; an upload is copied to data/dev/uploads, then verified streaming
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"        # one palette, validated against a light surface (projectors wash out dark)
+baseFontSize = 18
+primaryColor = "#0072B2"

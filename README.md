@@ -63,17 +63,17 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–7 (skeleton, incident simulation, streaming core
+> Implemented so far: phases 0–7 and phase 8 part A (skeleton, incident simulation, streaming core
 > + L1 container, L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened
 > export, L5 restore drill, verdict engine + `verify-all` matrix, JSON + HTML reports, `explain`
-> size forensics). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
+> size forensics, Streamlit dashboard, `make judge-test`). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
 > manifest from the hardened export carries snapshot counts and the compressed sha256, so L4 can be
 > fully evidenced; any other manifest leaves those two checks SKIP. L5 needs a scratch database
 > (`SCRATCH_DSN` or `--scratch-dsn`); without one it is SKIP. Only a hardened export with a scratch
 > database can reach VERIFIED (RAL 5). A SUSPECT verdict lists the missing evidence.
 > `make faults` builds F0–F7 and F1h (needs the database). `make verify-all` prints the fault matrix.
 > `make verify-all` also writes one JSON + HTML report per export to `data/reports/`.
-> `make dashboard`/`demo` still exit non-zero with "not implemented yet" until phase 8.
+> `make demo` still exits non-zero with "not implemented yet" until phase 8 part B.
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
@@ -85,7 +85,9 @@ make faults        # fault gallery (F0–F7, F1h) from a 50 000-row variant; F0 
                    # existing source and manifest, no database)
 make verify-all    # verify every export: fault × (gzip -t, L1–L5, verdict) matrix
 make explain       # size forensics: v1 → v2 (the incident) and F0 → F7 (compressor change)
-make dashboard     # open the Streamlit dashboard
+make dashboard     # Streamlit dashboard in the background: prints the URL (make dashboard-stop)
+make judge-test FILE=data/exports/v3.sql.gz OFFSET=20000000 MODE=flip \
+     MANIFEST=data/manifests/v3.manifest.json   # damage a copy anywhere you like, then verify it
 ```
 
 CLI:
@@ -481,6 +483,59 @@ Measured (`make explain`, `data/reports/explain_*.json`):
 HTML uses the verify report's CSS, with the new export's verdict banner and summary when its verify
 report was found, followed by the narrative, the decomposition table with CSS waterfall bars, the
 probe, the columns and each table's profile. verify reports themselves are left unchanged.
+
+### Dashboard and judge test (phase 8 part A)
+
+`make dashboard` starts `streamlit run dashboard/app.py` in the background (pid and log in
+`data/dev/`). It waits until `/_stcore/health` answers, prints `http://localhost:8501`
+(`DASHBOARD_PORT` to change it), and returns. `make dashboard-stop` stops it. Page loads only read
+the saved reports in `data/reports` (`EGUARD_REPORTS_DIR`), cached until a file changes, so run
+`make verify-all` and `make explain` first. Tabs:
+
+- **Verdict & evidence**: pick any export.
+  - The card shows the verdict, RAL x/5, a chip per layer and the management summary.
+  - Below it: the "where in the stream" table, the L5 confidence statement, and one expander per
+    layer with every check's message and raw evidence.
+  - The report's HTML can be downloaded or opened inline.
+- **Fault matrix**: `verify_all.json` as a heatmap with columns gzip -t, L1–L5, the verdict, and
+  "gzip -t says / ExportGuard says". The last column is flagged where gzip -t passed a CORRUPT
+  file. Hover a cell for the layer's reason; a table view is included.
+- **Size explained**: the `explain_*.json` pairs, v1 → v2 first.
+  - A waterfall: old size × rows × bytes per row × data compressibility × compressor = new size.
+    Each step multiplies the running size, so the bars depend on that order and add up to the new
+    size within `identity_tolerance` (tested).
+  - The narrative.
+  - A column drill-down: Δ bytes per row bars, then per-column width, NULL %, HLL distinct count
+    and entropy.
+- **Verify a file**: upload any `.gz`/`.Z` export, optionally with its manifest.
+  - The upload is copied to `data/dev/uploads/<id>/` and verified by the real engine:
+    `matrix.verify_one`, the same as `verify-all`, with L5 when `SCRATCH_DSN` is set.
+  - Its JSON + HTML report is written next to it.
+  - Streamlit can't link to a local HTML file, so the report is offered as a download and inline.
+
+Status colours are Okabe-Ito based: PASS `#0072B2` ✓, WARN `#E69F00` !, FAIL `#B03A00` ✗, SKIP
+`#C8C8C8` –. A test checks two things:
+- every pair stays ≥ 8 OKLab ΔE apart under simulated deutan, protan and tritan vision, and ≥ 15
+  for normal vision;
+- each status label has ≥ 4.5:1 contrast on its fill.
+
+Colour is never the only cue: each status also carries its symbol and its word. There are no
+external calls: no usage stats, no deploy button, no Plotly logo link, and no URL in
+`dashboard/` (tested).
+
+`make judge-test FILE=… OFFSET=… [MODE=flip|truncate] [MANIFEST=…]` lets anyone damage an export
+where they choose. OFFSET is a byte offset or a percentage (`50%`). `sim/judge.py` copies the file
+to `data/dev/judge_<mode>_<offset>_<name>`; the source is never touched.
+- `flip` XORs one byte, by default with the F3 mask from `config/sim.yaml`.
+- `truncate` keeps the first OFFSET bytes.
+
+It then runs `eguard verify` on the copy, with the report in `data/dev`. make fails only on a tool
+error. Measured on v3 (390,000 rows, 39.3 MB) with its manifest, at OFFSET=20000000:
+
+| MODE | verdict | where | time |
+|---|---|---|---|
+| flip | CORRUPT (exit 2): L1 CRC32, L2, L3 174,279 rows, L4, L5 | L4 first damaged chunk 13 of 39, rows 120,001–130,000 | 5.1 s |
+| truncate | CORRUPT (exit 2): L1 EOF at compressed byte 20,000,000, L2, L4 | after row 127,020, partial row of 85 bytes | 2.3 s |
 
 ## Documentation
 
