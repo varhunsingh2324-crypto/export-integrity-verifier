@@ -5,65 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ExportGuard report</title>
 <style>
-:root {
-  --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #66665f; --line: #deded8;
-  --code: #f0f0ec;
-  --pass: #1f7a3a; --pass-bg: #e6f4ea; --fail: #b3261e; --fail-bg: #fbe9e7;
-  --warn: #8a5a00; --warn-bg: #fff4dc; --skip: #66665f; --skip-bg: #ededea;
-  color-scheme: light dark;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #161614; --panel: #1f1f1d; --text: #ecece8; --muted: #a3a39b; --line: #3a3a36;
-    --code: #2a2a27;
-    --pass: #6fd08c; --pass-bg: #17321f; --fail: #ff8a80; --fail-bg: #3b1714;
-    --warn: #f5c35c; --warn-bg: #3a2c0c; --skip: #a3a39b; --skip-bg: #2a2a27;
-  }
-}
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
-h1 { font-size: 20px; margin: 0 0 4px; }
-h2 { font-size: 16px; margin: 32px 0 8px; }
-.muted { color: var(--muted); }
-.path { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
-.banner { border-radius: 10px; padding: 18px 20px; margin: 16px 0; border: 1px solid var(--line);
-  display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; }
-.banner .verdict { font-size: 28px; font-weight: 700; letter-spacing: .02em; }
-.banner .ral { font-size: 18px; font-weight: 600; }
-.VERIFIED { background: var(--pass-bg); color: var(--pass); }
-.SUSPECT { background: var(--warn-bg); color: var(--warn); }
-.CORRUPT, .TOOL_ERROR { background: var(--fail-bg); color: var(--fail); }
-.summary { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  padding: 14px 18px; font-size: 16px; }
-.summary p { margin: 0 0 6px; } .summary p:last-child { margin: 0; }
-.wrap { overflow-x: auto; }
-table { width: 100%; border-collapse: collapse; background: var(--panel);
-  border: 1px solid var(--line); border-radius: 10px; }
-th, td { text-align: left; vertical-align: top; padding: 8px 10px;
-  border-bottom: 1px solid var(--line); }
-th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-tr:last-child td { border-bottom: 0; }
-.st { display: inline-block; min-width: 44px; text-align: center; font-size: 12px; font-weight: 700;
-  border-radius: 4px; padding: 1px 6px; }
-.st.PASS { background: var(--pass-bg); color: var(--pass); }
-.st.FAIL { background: var(--fail-bg); color: var(--fail); }
-.st.WARN { background: var(--warn-bg); color: var(--warn); }
-.st.SKIP { background: var(--skip-bg); color: var(--skip); }
-tr.layer td { background: var(--code); font-weight: 600; }
-details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
-pre { background: var(--code); border-radius: 6px; padding: 8px 10px; margin: 6px 0 0;
-  font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap;
-  word-break: break-all; max-height: 360px; overflow: auto; }
-dl { display: grid; grid-template-columns: minmax(140px, max-content) 1fr; gap: 6px 16px;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px;
-  margin: 0; }
-dt { color: var(--muted); } dd { margin: 0; word-break: break-word; }
-.confidence { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-  padding: 14px 18px; margin: 0; }
-footer { margin-top: 32px; font-size: 13px; }
-@media print { details { display: block; } details > pre { display: block; } }
+{% include "_style.css.j2" %}
+
 </style>
 </head>
 <body>

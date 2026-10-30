@@ -52,6 +52,7 @@ app = typer.Typer(
 )
 
 TOOLS = ("gzip", "pigz", "compress")
+DATA = Path(__file__).resolve().parents[2] / "data"
 
 
 def _version_callback(value: bool) -> None:
@@ -238,6 +239,147 @@ def report_cmd(
     err.print(f"report: {target}")
 
 
+SHORT_FACTOR = {
+    "rows": "rows R",
+    "width": "bytes/row W",
+    "data": "data ratio C_fixed",
+    "compressor": "compressor E=C/C_fixed",
+    "ratio": "ratio C (=C_fixed×E)",
+}
+
+
+def _bar(effect: float | None, biggest: float) -> str:
+    if effect is None:
+        return ""
+    style = "yellow" if effect >= 0 else "green"
+    return f"[{style}]{'█' * round(12 * abs(effect) / biggest)}[/]"
+
+
+def _print_explain(x: Any, top: int) -> None:
+    from eguard.forensics import fmt_bytes, fmt_change, fmt_fraction, fmt_mib, fmt_ratio
+    from eguard.report.html import HYPOTHESIS, _value
+
+    d = x.decomposition
+    console.print(f"[bold]eguard explain[/] {x.old.path} → {x.new.path}")
+    for name, p in (("old", x.old), ("new", x.new)):
+        xfl = f", XFL {p.xfl}" if p.xfl is not None else ""
+        bad = f" [red]{p.container_error}[/]" if p.container_error else ""
+        console.print(
+            f"  {name}: {p.format} ({p.compressor}{xfl}, level hint {p.level_hint or 'none'}), "
+            f"{fmt_bytes(p.compressed_bytes)} compressed, {fmt_bytes(p.decompressed_bytes)} "
+            f"decompressed, {p.seconds:.1f} s{bad}",
+            markup=bool(bad),
+        )
+    table = Table(title=f"S = R × W ÷ C  (C_fixed: deflate level {x.probe.level})")
+    for column in ("factor", "old", "new", "change", "size effect", "waterfall"):
+        left = column in ("factor", "waterfall")
+        table.add_column(column, justify="left" if left else "right", no_wrap=True)
+    biggest = max((abs(f.effect_ln) for f in d.factors if f.effect_ln is not None), default=0) or 1
+    for f in d.factors:
+        effect = fmt_change(f.size_effect) if f.size_effect is not None else ""
+        old, new = _value(f.name, f.old), _value(f.name, f.new)
+        bar = _bar(f.effect_ln, biggest)
+        table.add_row(SHORT_FACTOR[f.name], old, new, fmt_change(f.change), effect, bar)
+    table.add_row(
+        "[bold]size S[/]",
+        fmt_bytes(x.old.compressed_bytes),
+        fmt_bytes(x.new.compressed_bytes),
+        fmt_change(d.observed_change),
+        fmt_change(d.product - 1),
+        f"err {d.identity_error:.0e}",
+    )
+    console.print(table)
+    p = x.probe
+    ratios = (
+        f"{fmt_ratio(p.old_ratio)} → {fmt_ratio(p.new_ratio)} ({fmt_change(p.probe_change)})"
+        if p.old_ratio is not None and p.new_ratio is not None and p.probe_change is not None
+        else "no data"
+    )
+    share = fmt_fraction(p.data_share) if p.data_share is not None else "n/a"
+    console.print(
+        f"probe: {fmt_mib(p.sample_bytes)} per stream, {p.compressor} level {p.level}, seed "
+        f"{p.seed}: {ratios}; files {fmt_change(p.observed_change)}; probe keeps {share}",
+        markup=False,
+    )
+    console.print(f"[bold]hypothesis:[/] {HYPOTHESIS[x.hypothesis]}")
+    _print_columns(x, top)
+    console.print("[bold]narrative:[/]")
+    for sentence in x.narrative:
+        console.print(f"  {sentence}", markup=False)
+
+
+def _print_columns(x: Any, top: int) -> None:
+    tables = sorted({c.table for c in x.columns if c.table is not None})
+    title = f"columns by |Δ width| (top {top}" + (f", {tables[0]})" if len(tables) == 1 else ")")
+    table = Table(title=title)
+    heads = ("#", "column", "B/row", "Δ", "NULL", "bits/B", "Δbits/row")
+    for column in heads:
+        table.add_column(column, justify="left" if column == "column" else "right", no_wrap=True)
+    for c in x.columns[:top]:
+        name = c.column if c.table is None or len(tables) == 1 else f"{c.table}.{c.column}"
+        nulls = (
+            f"{c.old_null_fraction:.0%}→{c.new_null_fraction:.0%}"
+            if c.old_null_fraction is not None and c.new_null_fraction is not None
+            else "–"
+        )
+        ent = (
+            f"{c.old_entropy:.2f}→{c.new_entropy:.2f}"
+            if c.old_entropy is not None and c.new_entropy is not None
+            else "–"
+        )
+        bits = f"{c.delta_bits:+.1f}" if c.delta_bits is not None else "–"
+        widths = f"{c.old_width:.1f}→{c.new_width:.1f}"
+        table.add_row(str(c.rank_width), name, widths, f"{c.delta_width:+.1f}", nulls, ent, bits)
+    console.print(table)
+
+
+@app.command()
+def explain(
+    old: Annotated[Path, typer.Argument(help="The earlier export (.gz or .Z).")],
+    new: Annotated[Path, typer.Argument(help="The later export.")],
+    reports: Annotated[
+        Path, typer.Option(help="Where to look for each file's saved verify_*.json (reused).")
+    ] = DATA / "reports",
+    report_dir: Annotated[
+        Path | None,
+        typer.Option(help="Also write explain_<old>__<new>.json and .html (self-contained) here."),
+    ] = None,
+    probe_bytes: Annotated[
+        int | None, typer.Option(min=1, help="Re-compress probe sample per file (policy default).")
+    ] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+) -> None:
+    """Explain a compressed-size change as rows × bytes-per-row ÷ compression ratio, with a
+    re-compress probe (compressor vs data) and a column drill-down. One streaming pass per file.
+
+    Exit: 0 explained; 3 tool error. explain issues no verdict: run `eguard verify` for that."""
+    from eguard.forensics import DecompositionError, explain_files
+    from eguard.stream import LineTooLong
+
+    policy = load_policy()
+    if probe_bytes is not None:
+        policy["explain"]["probe_bytes"] = probe_bytes
+    top = policy["explain"]["top_columns"]
+    try:
+        for path in (old, new):
+            if not path.is_file():
+                raise FileNotFoundError(f"{path}: no such file")
+        x = explain_files(old, new, policy, reports)
+    except (OSError, LineTooLong, DecompositionError) as exc:
+        raise _tool_error(f"{old} {new}", exc, as_json) from exc
+    if as_json:
+        typer.echo(x.model_dump_json(indent=2))
+    else:
+        _print_explain(x, top)
+    if report_dir is not None:
+        from eguard.matrix import explain_stem
+        from eguard.report.html import write_explain_reports
+
+        json_path, html_path = write_explain_reports(x, report_dir, explain_stem(old, new), top)
+        err.print(f"report: {json_path} + {html_path.name}")
+    raise typer.Exit(0)
+
+
 @app.command("manifest-build")
 def manifest_build(
     out: Annotated[
@@ -348,9 +490,6 @@ def export(
         err.print(f"[red]tool error:[/] export script exited {code}")
         code = Verdict.TOOL_ERROR.exit_code
     raise typer.Exit(code)
-
-
-DATA = Path(__file__).resolve().parents[2] / "data"
 
 
 def _gzip_t_cell(code: int | None) -> str:

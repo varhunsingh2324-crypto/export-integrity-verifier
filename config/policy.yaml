@@ -35,6 +35,19 @@ verdict:
   # means evidence is missing or approximate: SUSPECT. RAL = layers whose checks all PASS.
   corrupt_on_fail: [CRITICAL]
 
+explain:
+  # `eguard explain` size forensics (IMPLEMENTATION_PLAN §5).
+  level: 6                   # deflate level for per-table cost and the probe (= gzip -6)
+  probe_bytes: 33554432      # re-compress probe: equal-size sample from each stream (32 MiB)
+  probe_block_bytes: 65536   # reservoir unit; larger than deflate's 32 KiB window
+  probe_seed: 0              # fixed: explain is not a security check, so results reproduce
+  identity_tolerance: 0.01   # the waterfall must multiply back to the observed size ratio
+  ratio_unchanged: 0.01      # |C2/C1 - 1| below this: no compression-ratio gap to attribute
+  h1_max_data_share: 0.25    # probe keeps <= this share of the ratio gap -> compressor (H1)
+  data_min_share: 0.75       # probe keeps >= this share -> the data changed (H2/H3)
+  hll_precision: 14          # HyperLogLog registers 2**p per column (~0.8 % standard error)
+  top_columns: 5             # columns shown in the drill-down (the JSON keeps every one)
+
 exit_codes:
   VERIFIED: 0
   SUSPECT: 1

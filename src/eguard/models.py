@@ -334,3 +334,150 @@ class SourceTable(BaseModel):
     drift_deleted: int = 0
     excluded: int = 0  # sampled rows not compared: they failed restore or the round trip
     examples: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# -- size forensics (`eguard explain`, IMPLEMENTATION_PLAN §5) -------------------------------------
+
+
+class ColumnProfile(BaseModel):
+    """One column of one table, over the rows whose field count matched the COPY header."""
+
+    column: str
+    rows: int
+    bytes: int  # field bytes as written in the dump (COPY text, `\N` included), no delimiters
+    value_bytes: int  # bytes of non-NULL values only (what the entropy is measured over)
+    nulls: int
+    null_fraction: float
+    avg_width: float  # bytes / rows
+    distinct_hll: int  # HyperLogLog estimate of distinct non-NULL values
+    entropy_bits: float | None  # Shannon, bits per byte of the non-NULL values; None if empty
+
+
+class TableProfile(BaseModel):
+    table: str
+    rows: int  # parsed rows
+    unparsed_rows: int  # field count differs from the COPY header (bytes go to unparsed_bytes)
+    unparsed_bytes: int
+    raw_bytes: int  # every row line of the table's COPY block(s), newlines included
+    fixed_level_bytes: int  # those row bytes deflated on their own at policy explain.level
+    fixed_ratio: float | None
+    entropy_bits: float | None
+    columns: list[ColumnProfile]
+
+
+class FileProfile(BaseModel):
+    """One export, profiled in one streaming pass. The four byte components sum exactly to
+    decompressed_bytes: field + delimiter + unparsed + other."""
+
+    path: str
+    format: str  # from the magic bytes
+    compressor: str
+    level_hint: str | None
+    xfl: int | None  # gzip XFL of the first member
+    compress_maxbits: int | None
+    members: int
+    container_error: str | None
+    compressed_bytes: int
+    decompressed_bytes: int
+    lines: int
+    rows: int  # every row line in COPY blocks, parsed or not
+    field_bytes: int
+    delimiter_bytes: int  # tabs between fields + the newline of each parsed row
+    unparsed_bytes: int
+    other_bytes: int  # non-row stream bytes: header, DDL, COPY headers, `\.`, markers
+    fixed_level_bytes: int  # Σ per-table sections + the non-row bytes, each deflated at the level
+    entropy_bits: float | None  # whole decompressed stream
+    tables: list[TableProfile]
+    seconds: float
+
+
+class Factor(BaseModel):
+    """One factor of S = R × W ÷ C. A step's size effect is exp(effect_ln) - 1; C itself is shown
+    for reference and is split into the `data` and `compressor` steps (C = C_fixed × E)."""
+
+    name: str  # rows, width, data, compressor, ratio
+    label: str
+    old: float
+    new: float
+    change: float  # new / old - 1
+    effect_ln: float | None  # signed contribution to ln(S_new / S_old); None: not a step
+    size_effect: float | None
+
+
+class Decomposition(BaseModel):
+    factors: list[Factor]
+    observed_ratio: float  # S_new / S_old
+    observed_change: float
+    product: float  # exp(Σ effect_ln): the waterfall multiplied back
+    identity_error: float  # product / observed_ratio - 1 (|.| <= policy identity_tolerance)
+
+
+class ProbeResult(BaseModel):
+    """Equal-size samples of both decompressed streams, deflated with the same level."""
+
+    compressor: str
+    level: int
+    seed: int
+    block_bytes: int
+    blocks: int  # per file, after the larger reservoir was downsampled to the same count
+    sample_bytes: int  # per file, equal
+    old_ratio: float | None
+    new_ratio: float | None
+    probe_change: float | None
+    observed_change: float  # C_new / C_old - 1 of the files themselves
+    ratio_unchanged: float  # policy: below this observed change there is no gap to attribute
+    data_share: float | None  # ln(probe ratio change) / ln(observed ratio change)
+    hypothesis: str  # H1, H2/H3, mixed, none
+
+
+class ColumnDelta(BaseModel):
+    """A component of the row width W, old vs new. Widths are bytes per row of the whole file,
+    so Σ delta_width over every component equals ΔW exactly."""
+
+    table: str | None  # None for the non-column components
+    column: str  # column name, or (delimiters), (unparsed rows), (non-row bytes)
+    present: str  # both, old, new
+    old_width: float
+    new_width: float
+    delta_width: float
+    old_avg_width: float | None  # bytes per value within the table
+    new_avg_width: float | None
+    old_null_fraction: float | None
+    new_null_fraction: float | None
+    old_distinct: int | None
+    new_distinct: int | None
+    old_entropy: float | None
+    new_entropy: float | None
+    delta_entropy: float | None
+    old_bits_per_row: float | None  # entropy × value bytes ÷ file rows (order-0 information)
+    new_bits_per_row: float | None
+    delta_bits: float | None
+    rank_width: int  # 1 = largest |delta_width|
+    rank_bits: int | None  # 1 = largest |delta_bits|
+
+
+class IntegrityRef(BaseModel):
+    """A saved `verify` report for the same file, reused as-is (explain issues no verdict)."""
+
+    status: str  # found, stale (sizes differ from this pass), none
+    report: str | None = None
+    verdict: Verdict | None = None
+    ral: int | None = None
+    failed_layers: list[int] = Field(default_factory=list)
+    incomplete_layers: list[int] = Field(default_factory=list)  # WARN / SKIP
+    generated_at: str | None = None
+    detail: str
+
+
+class ExplainReport(BaseModel):
+    tool: str
+    generated_at: str
+    old: FileProfile
+    new: FileProfile
+    decomposition: Decomposition
+    probe: ProbeResult
+    hypothesis: str  # the probe's attribution of the compression-ratio change
+    columns: list[ColumnDelta]
+    integrity_old: IntegrityRef
+    integrity_new: IntegrityRef
+    narrative: list[str]

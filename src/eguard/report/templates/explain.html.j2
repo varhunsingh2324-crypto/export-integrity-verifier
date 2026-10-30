@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ExportGuard explain</title>
+<style>
+{% include "_style.css.j2" %}
+
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.barcell { min-width: 160px; }
+.bar { height: 12px; border-radius: 3px; display: inline-block; vertical-align: middle; }
+.bar.up { background: var(--warn); } .bar.down { background: var(--pass); }
+tr.total td { font-weight: 600; background: var(--code); }
+.hyp { font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+<h1>ExportGuard size explanation</h1>
+<div class="muted path">{{ x.old.path }} → {{ x.new.path }}</div>
+
+{% if new_report %}
+<section class="banner {{ new_report.verdict }}" aria-label="verdict of the new export">
+  <span class="verdict">{{ new_report.verdict }}</span>
+  <span class="ral">RAL {{ new_report.ral }}/5</span>
+  <span>new export, from its verify report{% if new_report.generated_at %} ({{ new_report.generated_at }}){% endif %}</span>
+  <span>
+  {% for lr in new_report.layers %}<span class="st {{ lr.status }}" title="{{ lr.name }}">L{{ lr.layer }} {{ lr.status }}</span> {% endfor %}
+  </span>
+</section>
+<section class="summary" aria-label="integrity summary">
+{% for sentence in new_summary %}
+  <p>{{ sentence }}</p>
+{% endfor %}
+</section>
+{% else %}
+<section class="banner SUSPECT" aria-label="integrity not assessed">
+  <span class="verdict">NOT VERIFIED</span>
+  <span>{{ x.integrity_new.detail }}</span>
+</section>
+{% endif %}
+
+<h2>Why the size changed</h2>
+<section class="summary" aria-label="narrative">
+{% for sentence in x.narrative %}
+  <p>{{ sentence }}</p>
+{% endfor %}
+</section>
+
+<h2>Decomposition S = R × W ÷ C</h2>
+<div class="wrap"><table>
+  <tr><th>Factor</th><th class="num">Old</th><th class="num">New</th><th class="num">Change</th><th class="num">Size effect</th><th>Waterfall</th></tr>
+  {% for f, bar in factors %}
+  <tr><td>{{ f.label }}</td><td class="num">{{ value(f.name, f.old) }}</td><td class="num">{{ value(f.name, f.new) }}</td>
+    <td class="num">{{ fmt_change(f.change) }}</td>
+    <td class="num">{{ fmt_change(f.size_effect) if f.size_effect is not none else "= data × compressor" }}</td>
+    <td class="barcell">{% if bar is not none %}<span class="bar {{ 'up' if f.effect_ln >= 0 else 'down' }}" style="width: {{ bar }}%"></span>{% endif %}</td></tr>
+  {% endfor %}
+  <tr class="total"><td>Compressed size (S)</td><td class="num">{{ fmt_bytes(x.old.compressed_bytes) }}</td><td class="num">{{ fmt_bytes(x.new.compressed_bytes) }}</td>
+    <td class="num">{{ fmt_change(d.observed_change) }}</td><td class="num">{{ fmt_change(d.product - 1) }}</td>
+    <td>product of the steps; identity error {{ "%.2e"|format(d.identity_error) }}</td></tr>
+</table></div>
+<p class="muted">C_fixed deflates the decompressed stream at level {{ x.probe.level }} (each table section on its own), so it measures the data; E = C ÷ C_fixed is what the original compressor did relative to that level.</p>
+
+<h2>Re-compress probe</h2>
+<dl>
+  <dt>Hypothesis</dt><dd class="hyp">{{ hypothesis_text }}</dd>
+  <dt>Sample</dt><dd>{{ fmt_mib(x.probe.sample_bytes) }} from each stream ({{ x.probe.blocks }} blocks of {{ fmt_count(x.probe.block_bytes) }} B, seed {{ x.probe.seed }}), {{ x.probe.compressor }} level {{ x.probe.level }}</dd>
+  <dt>Probe ratio</dt><dd>{% if x.probe.old_ratio is not none %}{{ fmt_ratio(x.probe.old_ratio) }} → {{ fmt_ratio(x.probe.new_ratio) }} ({{ fmt_change(x.probe.probe_change) }}){% else %}no data{% endif %}</dd>
+  <dt>Files' own ratio</dt><dd>{{ fmt_change(x.probe.observed_change) }}</dd>
+  <dt>Share kept by the probe</dt><dd>{{ fmt_fraction(x.probe.data_share) if x.probe.data_share is not none else "no ratio gap to attribute" }}</dd>
+  {% for name, p in (("Old container", x.old), ("New container", x.new)) %}
+  <dt>{{ name }}</dt><dd>{{ p.format }}: {{ p.compressor }}{% if p.xfl is not none %}, XFL {{ p.xfl }}{% endif %}, level hint {{ p.level_hint or "none" }}, {{ p.members }} member(s){% if p.container_error %} · <strong>{{ p.container_error }}</strong>{% endif %}</dd>
+  {% endfor %}
+</dl>
+
+<h2>Column drill-down</h2>
+<div class="wrap"><table>
+  <tr><th>#</th><th>Component</th><th class="num">Width old → new (B/row)</th><th class="num">Δ width</th><th class="num">NULL old → new</th><th class="num">Distinct (HLL) old → new</th><th class="num">Entropy old → new (bits/B)</th><th class="num">Δ bits/row</th></tr>
+  {% for c in columns %}
+  <tr><td>{{ c.rank_width }}</td><td>{{ c.column if c.table is none else c.table ~ "." ~ c.column }}{% if c.present != "both" %} <span class="muted">({{ c.present }} only)</span>{% endif %}</td>
+    <td class="num">{{ "%.1f"|format(c.old_width) }} → {{ "%.1f"|format(c.new_width) }}</td>
+    <td class="num">{{ "%+.1f"|format(c.delta_width) }}</td>
+    <td class="num">{% if c.old_null_fraction is not none and c.new_null_fraction is not none %}{{ fmt_fraction(c.old_null_fraction) }} → {{ fmt_fraction(c.new_null_fraction) }}{% else %}–{% endif %}</td>
+    <td class="num">{% if c.old_distinct is not none and c.new_distinct is not none %}{{ fmt_count(c.old_distinct) }} → {{ fmt_count(c.new_distinct) }}{% else %}–{% endif %}</td>
+    <td class="num">{% if c.old_entropy is not none and c.new_entropy is not none %}{{ "%.2f"|format(c.old_entropy) }} → {{ "%.2f"|format(c.new_entropy) }}{% else %}–{% endif %}</td>
+    <td class="num">{{ "%+.1f"|format(c.delta_bits) if c.delta_bits is not none else "–" }}</td></tr>
+  {% endfor %}
+</table></div>
+{% if columns_more %}<p class="muted">… and {{ columns_more }} more component(s) in the JSON report.</p>{% endif %}
+
+<h2>Tables</h2>
+<div class="wrap"><table>
+  <tr><th>File</th><th>Table</th><th class="num">Rows</th><th class="num">Row bytes</th><th class="num">Deflated at level {{ x.probe.level }}</th><th class="num">Ratio</th><th class="num">Entropy (bits/B)</th></tr>
+  {% for side, p in (("old", x.old), ("new", x.new)) %}
+  {% for t in p.tables %}
+  <tr><td>{{ side }}</td><td>{{ t.table }}</td><td class="num">{{ fmt_count(t.rows) }}{% if t.unparsed_rows %} (+{{ fmt_count(t.unparsed_rows) }} unparsed){% endif %}</td>
+    <td class="num">{{ fmt_bytes(t.raw_bytes) }}</td><td class="num">{{ fmt_bytes(t.fixed_level_bytes) }}</td>
+    <td class="num">{{ fmt_ratio(t.fixed_ratio) if t.fixed_ratio else "–" }}</td>
+    <td class="num">{{ "%.3f"|format(t.entropy_bits) if t.entropy_bits is not none else "–" }}</td></tr>
+  {% endfor %}
+  {% endfor %}
+</table></div>
+
+<footer class="muted">Generated by {{ x.tool }} at {{ x.generated_at }}. One streaming pass per file; nothing decompressed was written to disk. The JSON next to this file holds every number on this page. explain issues no verdict: integrity comes from the verify reports ({{ x.integrity_old.status }} for old, {{ x.integrity_new.status }} for new).</footer>
+</main>
+</body>
+</html>

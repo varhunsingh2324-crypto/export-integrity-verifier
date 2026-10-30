@@ -18,6 +18,7 @@ dependencies = [
     "plotly",
     "streamlit",
     "datasketch",
+    "numpy",
 ]
 
 [project.optional-dependencies]

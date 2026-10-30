@@ -63,9 +63,10 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–6 (skeleton, incident simulation, streaming core
+> Implemented so far: phases 0–7 (skeleton, incident simulation, streaming core
 > + L1 container, L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened
-> export, L5 restore drill, verdict engine + `verify-all` matrix, JSON + HTML reports). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
+> export, L5 restore drill, verdict engine + `verify-all` matrix, JSON + HTML reports, `explain`
+> size forensics). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
 > manifest from the hardened export carries snapshot counts and the compressed sha256, so L4 can be
 > fully evidenced; any other manifest leaves those two checks SKIP. L5 needs a scratch database
 > (`SCRATCH_DSN` or `--scratch-dsn`); without one it is SKIP. Only a hardened export with a scratch
@@ -83,6 +84,7 @@ make faults        # fault gallery (F0–F7, F1h) from a 50 000-row variant; F0 
                    # export (`python -m sim.faults --only F4 --only F5`: rebuild some from the
                    # existing source and manifest, no database)
 make verify-all    # verify every export: fault × (gzip -t, L1–L5, verdict) matrix
+make explain       # size forensics: v1 → v2 (the incident) and F0 → F7 (compressor change)
 make dashboard     # open the Streamlit dashboard
 ```
 
@@ -98,12 +100,14 @@ eguard verify  data/exports/v3.sql.gz --manifest … --report-dir data/reports  
 eguard verify-all data/exports --json                            # every export, worst exit code
 eguard report  data/reports/verify_v3.json                        # re-render HTML from saved JSON
 eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz      # size-anomaly forensics
+eguard explain OLD NEW --json --report-dir data/reports           # + explain_<old>__<new>.json/.html
 ```
 
 Exit codes: `0` VERIFIED · `1` SUSPECT · `2` CORRUPT · `3` tool error — so it drops straight into cron/CI/monitoring.
 Every `eguard` command keeps to them: a usage error, a crash or Ctrl-C exits 3 (Click alone would
 exit 2 or 1, which would read as CORRUPT or SUSPECT); `manifest-build` exits 2 on an incomplete
-dump; `verify-all` exits with its worst row.
+dump; `verify-all` exits with its worst row. `explain` issues no verdict: it exits 0 once the
+change is explained, 3 on a tool error.
 
 ### The simulated incident
 
@@ -424,6 +428,59 @@ take 300 KB.
 gzip -t, every layer and the verdict, except F3/F4's L3/L5, which must instead agree with L4 and
 with each other. Its rename test copies every file and manifest to random names, directories and
 extensions and gets identical verdicts, layers and evidence (rule 9).
+
+### Size forensics: `eguard explain OLD NEW` (phase 7)
+
+Why did the file shrink while the rows grew? `explain` streams each file once (nothing decompressed
+touches the disk) and splits the compressed size exactly:
+
+```
+S = R × W ÷ C,   C = C_fixed × E
+ln(S2/S1) = ln(R2/R1) + ln(W2/W1) − ln(C_fixed2/C_fixed1) − ln(E2/E1)
+```
+
+R is the number of rows, W the decompressed bytes per row and C the decompressed bytes over the
+compressed bytes. C_fixed is the same stream deflated at `policy.explain.level` (6), with each
+table's COPY section compressed on its own, so it measures the data. E = C ÷ C_fixed is what the
+original compressor did relative to that level. W is summed from its parts (column bytes,
+delimiters, unparsed rows, non-row bytes) and C from the stream total. The waterfall must multiply
+back to the observed size ratio within `identity_tolerance` (1 %); if it doesn't, explain exits 3.
+
+- **Profile** for each table and column: rows, bytes, average width, NULL fraction, HyperLogLog
+  distinct count (datasketch, p = 14), Shannon entropy in bits per byte (numpy histogram), and each
+  table's compressed cost at the fixed level. Memory is bounded: per column, one HLL, one
+  histogram and a 1 MiB buffer.
+- **Re-compress probe**: a uniform reservoir of 64 KiB blocks, up to `probe_bytes` (32 MiB, also
+  `--probe-bytes`) from each decompressed stream. The larger reservoir is cut to the same block
+  count and both samples are deflated at the same level.
+  - If the probe keeps ≤ 25 % of the files' ratio change, the compressor or its level changed
+    (**H1**).
+  - If it keeps ≥ 75 %, the data changed (**H2/H3**).
+  - In between, both contributed.
+  - The container format, gzip XFL level hint and `.Z` max bits are reported alongside.
+- **Column drill-down**: every component of W, ranked by its contribution to ΔW (the
+  contributions sum exactly to ΔW) and by Δ bits per row (entropy × value bytes ÷ rows).
+- **Narrative**: every number is formatted from a field of the JSON (a test checks this). The last
+  sentence comes from each file's saved `verify_*.json` in `--reports` (default `data/reports`). A
+  report is reused only if its L1 byte counts match this pass; otherwise it is reported as stale.
+
+Measured (`make explain`, `data/reports/explain_*.json`):
+
+| | v1 → v2 (incident) | F0 `pigz -6` → F7 `gzip -1` |
+|---|---:|---:|
+| rows R | +30.0 % | +0.0 % |
+| bytes per row W | 326.8 B → 220.7 B (−32.5 %) | +0.0 % |
+| data ratio at level 6 (size effect) | 1.98× → 2.19× (−9.6 %) | 2.18× → 2.18× (+0.0 %) |
+| compressor E (size effect) | +0.0 % | 1.00× → 0.94× (+6.5 %) |
+| compressed size S | −20.6 % | +6.5 % |
+| probe keeps of the ratio change | 99.0 % → **H2/H3** | 0.0 % → **H1** |
+| main drivers of W | `remarks` −52.4 B/row (NULL 0 % → 44.4 %), `meta` −51.1 B/row | none |
+| wall time / peak RSS | 14.9–15.0 s / 193–202 MiB | 3.5–6.1 s / 140–149 MiB |
+
+`--report-dir` writes `explain_<old>__<new>.json` (= `--json`) and a self-contained `.html`. The
+HTML uses the verify report's CSS, with the new export's verdict banner and summary when its verify
+report was found, followed by the narrative, the decomposition table with CSS waterfall bars, the
+probe, the columns and each table's profile. verify reports themselves are left unchanged.
 
 ## Documentation
 

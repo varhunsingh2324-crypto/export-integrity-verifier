@@ -105,3 +105,8 @@ def verify_one(
 def worst_exit(rows: list[MatrixRow]) -> int:
     """Rule 7 over many files: 3 (tool error) > 2 (CORRUPT) > 1 (SUSPECT) > 0; no files is 3."""
     return max((r.exit_code for r in rows), default=Verdict.TOOL_ERROR.exit_code)
+
+
+def explain_stem(old: Path, new: Path) -> str:
+    """`explain_<old>__<new>` from the export names, e.g. explain_v1__v2."""
+    return f"explain_{export_name(old)}__{export_name(new)}"
