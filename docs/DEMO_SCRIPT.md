@@ -19,7 +19,9 @@ in production and prove your tool catches it when the usual check does not.
 ## 1. Pre-demo checklist (T−30 min)
 
 - [ ] `make down && make demo` completed today on *this* laptop; note wall-clock time.
-- [ ] Rehearsal check passed: `make verify-all` matches the fault matrix in `IMPLEMENTATION_PLAN.md` §6.
+- [ ] Rehearsal check passed: `make verify-all` matches the fault matrix in `IMPLEMENTATION_PLAN.md` §6;
+      incident within target (+30 % ± 1 % rows, −20 % ± 3 % size); `eguard explain v1 v2` multiplies out;
+      `gzip -t` OK on F1 while ExportGuard says CORRUPT; one HTML report per export; dashboard starts.
 - [ ] All exports + reports pre-generated in `data/` (live commands re-run quickly; heavy generation is not live).
 - [ ] Dashboard loads; every chart renders.
 - [ ] Laptop on power, notifications off, Wi-Fi not required (everything is local).

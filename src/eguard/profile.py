@@ -2,7 +2,7 @@
 
 It runs in the same single streaming pass as everything else: `Profiler` listens to the parser's
 rows and also subscribes to the line fan-out, after the parser, to catch the non-row lines.
-Memory is bounded (rule 2): per column one HyperLogLog (2**p registers), a 256-bin
+Memory is bounded (CONTRIBUTING.md rule 2): per column one HyperLogLog (2**p registers), a 256-bin
 byte histogram and a flush buffer of at most FLUSH_BYTES; per table one deflate stream.
 """
 

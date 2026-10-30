@@ -120,7 +120,7 @@ class VerifyReport(BaseModel):
     manifest: str | None = None  # manifest path the export was reconciled against
     verdict: Verdict
     ral: int = Field(ge=0, le=5)
-    exit_code: int = 0  # rule 7
+    exit_code: int = 0  # CONTRIBUTING.md rule 7
     layers: list[LayerResult] = Field(default_factory=list)
     checks: list[CheckResult]
     reasons: list[str] = Field(default_factory=list)  # why not VERIFIED (verdict.explain)

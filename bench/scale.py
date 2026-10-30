@@ -9,7 +9,7 @@ past `bench.disk_budget_bytes`, the run stops and results.md says so.
 
 The re-import streams `gzip -dc` into psql inside the container (ON_ERROR_STOP) in a throwaway
 database, records wall time and pg_database_size growth, and drops the database in `finally`.
-Every number written to bench/results.md comes from this run (rule 5).
+Every number written to bench/results.md comes from this run (CONTRIBUTING.md rule 5).
 """
 
 import json

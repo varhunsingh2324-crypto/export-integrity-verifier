@@ -167,14 +167,14 @@ currency char(3), status text, channel text, merchant_code text, remarks text, m
 - Generated **inside PostgreSQL** with `generate_series` + `md5(random()::text)` (fast; millions of rows in seconds).
 
 **Incident storyline** (all parameters in `config/sim.yaml`; calibrate until the numbers match):
-1. Seed **N** rows (default 300 000, set by the disk budget, rule 10; `--scale` for bigger) → **export v1** with the *legacy* pipeline
+1. Seed **N** rows (default 300 000, set by the disk budget in CONTRIBUTING.md rule 10; `--scale` for bigger) → **export v1** with the *legacy* pipeline
    (`pg_dump | gzip > v1.sql.gz`).
 2. Business event: a data-privacy job **NULLs `remarks` and trims `meta`** for rows older than a cut-off;
    a new app release inserts **+30 %** rows whose `remarks` is NULL and `status/channel` are low-cardinality.
 3. **Export v2** with the same legacy pipeline → +30 % rows, ≈ −20 % file size. *This is the incident.*
 
 **Fault-injection gallery** (`sim/faults.py`), each a separate export file, built from a 50 000-row run of the incident
-(`faults.source_rows`), never from the full dataset (rule 10):
+(`faults.source_rows`), never from the full dataset (CONTRIBUTING.md rule 10):
 
 | ID | Fault | How it is produced | Expected result |
 |---|---|---|---|
@@ -223,6 +223,8 @@ sum64, xor64, chunk_roots[]}`, uncompressed sha256, compressed sha256, and an HM
 ```
 export-integrity-verifier/
 ├── README.md
+├── CONTRIBUTING.md                 # engineering rules (cited as "rule N") and code style
+├── LICENSE                         # MIT
 ├── IMPLEMENTATION_PLAN.md          # this file
 ├── pyproject.toml                  # package + deps + console script `eguard`
 ├── Makefile                        # up, seed, incident, faults, verify-all, dashboard, test, bench
@@ -292,7 +294,7 @@ as needed — phases 1–6 are the core, 7–8 are what make it stand out.
   incident file is healthy. They are SUSPECT by design, not VERIFIED: without a manifest L4 is SKIP, and
   only a fully evidenced export (hardened + manifest + L5) can be VERIFIED (corrected in phase 8).
 - **Benchmark** (not a test): MB/s and peak RSS at 1×, 5×, 10× scale. Each scale is generated,
-  measured and deleted before the next; only the numbers are kept (rule 10); compare with a timed full
+  measured and deleted before the next; only the numbers are kept (CONTRIBUTING.md rule 10); compare with a timed full
   re-import (`psql < dump`) once at small scale to quote a honest speed/space ratio.
 
 ## 11. Stretch goals (only after phase 8)

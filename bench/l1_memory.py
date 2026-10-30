@@ -7,7 +7,7 @@ file is built by streamed copy; nothing is ever decompressed to disk. Peak RSS c
 for that one child; VmRSS is also sampled from /proc every 0.25 s to show the curve is flat, not
 just the peak.
 Results are appended to bench/results.md (rule 5: only measured numbers in docs). The big
-file is deleted as soon as it has been measured (rule 10: disk budget).
+file is deleted as soon as it has been measured (CONTRIBUTING.md rule 10: disk budget).
 """
 
 import json

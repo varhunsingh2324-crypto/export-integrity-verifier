@@ -1,6 +1,6 @@
 # Why v2 has +30 % rows but a 20.6 % smaller file
 
-Source: `data/reports/explain_v1__v2.json` (`eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz`, eguard 0.0.1, generated 2026-10-30T10:39:05+00:00). Every number below is copied from that file by a script, never typed by hand (rule 5). Regenerate with `make explain` if the exports are rebuilt.
+Source: `data/reports/explain_v1__v2.json` (`eguard explain data/exports/v1.sql.gz data/exports/v2.sql.gz`, eguard 0.0.1, generated 2026-10-30T10:39:05+00:00). Every number below is copied from that file by a script, never typed by hand (CONTRIBUTING.md rule 5). Regenerate with `make explain` if the exports are rebuilt.
 
 ## The answer (the tool's own narrative)
 

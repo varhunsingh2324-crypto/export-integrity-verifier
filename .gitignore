@@ -5,3 +5,17 @@ data/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.hypothesis/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Dumps, manifests and reports belong in data/ (regenerable); never commit one from elsewhere
+*.sql.gz
+*.sql.Z
+*.dmp.gz
+*.partial
+*.FAILED
+*.manifest.json
+.env.*
+!.env.example

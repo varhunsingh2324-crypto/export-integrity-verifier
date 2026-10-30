@@ -1,4 +1,4 @@
-"""Rule 9 helpers: copy files to random names and compare verdicts."""
+"""CONTRIBUTING.md rule 9 helpers: copy files to random names and compare verdicts."""
 
 import secrets
 import shutil

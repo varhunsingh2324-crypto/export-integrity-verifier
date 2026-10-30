@@ -2,7 +2,7 @@
 
 Which manifest belongs to which file is orchestration, like passing --manifest by hand: it comes
 from the fault gallery record (data/reports/faults.json), else the `eguard export` default
-<manifests>/<name>.manifest.json. Detection itself never sees a file name (rule 9).
+<manifests>/<name>.manifest.json. Detection itself never sees a file name (CONTRIBUTING.md rule 9).
 """
 
 import json

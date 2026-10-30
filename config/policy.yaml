@@ -1,5 +1,5 @@
 # Verdict thresholds. Values come from IMPLEMENTATION_PLAN.md §4.
-# Never edit these to make a test pass (rule 4).
+# Never edit these to make a test pass (CONTRIBUTING.md rule 4).
 
 stream:
   chunk_bytes: 1048576       # compressed read size and max decompressed bytes per inflate step

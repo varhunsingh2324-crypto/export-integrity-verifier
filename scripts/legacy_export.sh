@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Legacy export: reproduces the production job exactly as it ran — `pg_dump | gzip > file`.
 #
-# DELIBERATELY NAIVE: no `set -euo pipefail`, no PIPESTATUS check (rule 8 exception).
+# DELIBERATELY NAIVE: no `set -euo pipefail`, no PIPESTATUS check (CONTRIBUTING.md rule 8 exception).
 # A pipeline's exit status is that of its LAST command. If pg_dump dies mid-stream, gzip just sees
 # end-of-input, writes a valid trailer and exits 0: the job "succeeds" and `gzip -t` passes on half
 # a table. That silent failure is exactly what ExportGuard must detect, so this script must keep it.

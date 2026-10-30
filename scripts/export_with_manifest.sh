@@ -11,7 +11,7 @@
 #   4. OUT.partial becomes OUT only after every stage succeeded; then `eguard verify` runs.
 #
 # Any failure: OUT.partial -> OUT.FAILED, the manifest -> .FAILED, a per-stage report, non-zero exit.
-# Exit codes (rule 7): eguard verify's own code (0 VERIFIED, 1 SUSPECT, 2 CORRUPT) when
+# Exit codes (CONTRIBUTING.md rule 7): eguard verify's own code (0 VERIFIED, 1 SUSPECT, 2 CORRUPT) when
 # the export completed; 2 if any pipeline stage failed (the export is unusable); 3 config error.
 # A CORRUPT or tool-error verify also quarantines the files as .FAILED.
 #
