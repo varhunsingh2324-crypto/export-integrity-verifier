@@ -55,3 +55,14 @@ faults:
   f5: {row: 33333, column: amount, delta: "1.00"}  # one value changed, re-gzipped (valid container)
   f6: {start_row: 10001, rows: 10000}       # rows 10001-20000 of the COPY block sent twice
   f7: {compressor: gzip, level: 1}          # same table re-exported (hardened) with gzip -1, not pigz -6
+
+# Scale benchmark (`make bench`, bench/scale.py). Disk budget (rule 10): each scale is
+# seeded in its own schema, exported, measured, then the export and the schema are deleted before
+# the next scale. A scale whose estimated export would push the project past the budget is skipped
+# and the run stops there (said so in bench/results.md).
+bench:
+  scales: [1, 3, 5]             # multiples of base_rows
+  schema: eguard_bench
+  restore_db: eguard_restore_bench   # throwaway database for the one full re-import (dropped after)
+  reimport_scale: 1             # which scale's export is fully re-imported for comparison
+  disk_budget_bytes: 1500000000

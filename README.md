@@ -63,17 +63,24 @@ They are skipped only when `PG_DSN` is unset.
 
 ## Quick start
 
-> Implemented so far: phases 0–7 and phase 8 part A (skeleton, incident simulation, streaming core
+> Implemented: phases 0–8 (skeleton, incident simulation, streaming core
 > + L1 container, L2 dump structure, L3 row validity, fingerprints + signed manifest + L4, hardened
 > export, L5 restore drill, verdict engine + `verify-all` matrix, JSON + HTML reports, `explain`
-> size forensics, Streamlit dashboard, `make judge-test`). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
+> size forensics, Streamlit dashboard, `make judge-test`, scale benchmark, `make demo`). `eguard verify` runs L1–L5. L4 needs `--manifest`; without one it is SKIP. A
 > manifest from the hardened export carries snapshot counts and the compressed sha256, so L4 can be
 > fully evidenced; any other manifest leaves those two checks SKIP. L5 needs a scratch database
 > (`SCRATCH_DSN` or `--scratch-dsn`); without one it is SKIP. Only a hardened export with a scratch
 > database can reach VERIFIED (RAL 5). A SUSPECT verdict lists the missing evidence.
 > `make faults` builds F0–F7 and F1h (needs the database). `make verify-all` prints the fault matrix.
 > `make verify-all` also writes one JSON + HTML report per export to `data/reports/`.
-> `make demo` still exits non-zero with "not implemented yet" until phase 8 part B.
+
+One command for the whole story, from a clean database (measured: 1 m 35.4 s, see below):
+
+```bash
+make up && make demo   # reset DB → incident → v3 hardened export → faults → verify-all → explain → dashboard
+```
+
+Step by step:
 
 ```bash
 make up            # start PostgreSQL 16 in Docker (the simulated "production" DB)
@@ -88,6 +95,7 @@ make explain       # size forensics: v1 → v2 (the incident) and F0 → F7 (com
 make dashboard     # Streamlit dashboard in the background: prints the URL (make dashboard-stop)
 make judge-test FILE=data/exports/v3.sql.gz OFFSET=20000000 MODE=flip \
      MANIFEST=data/manifests/v3.manifest.json   # damage a copy anywhere you like, then verify it
+make bench         # verify L1–L5 at 1×/3×/5× + one full re-import; appends to bench/results.md
 ```
 
 CLI:
@@ -208,8 +216,8 @@ builds the faults from the 50 000-row variant (`data/reports/faults.json`):
 L2 and L3 cost throughput. In `make bench`, the 300 000-row v1 (49.5 MB) takes 4.0 s, or
 12.5 MB/s compressed, about 10× slower than L1 alone was. Peak RSS is 81.7 MiB on v1 and 81.6 MiB on
 the 7× file (346 MB, deleted after measuring). That file is 7 concatenated dumps, and L3 validates
-only the first of them, so it does not measure memory at 7× rows. That measurement is phase 8's
-scale bench.
+only the first of them, so it does not measure memory at 7× rows. The phase 8 scale bench below
+does: real 0.9 M and 1.5 M-row tables, with L4 and L5 included.
 
 ### Fingerprints, signed manifest and L4 (phase 4 part A)
 
@@ -536,6 +544,88 @@ error. Measured on v3 (390,000 rows, 39.3 MB) with its manifest, at OFFSET=20000
 |---|---|---|---|
 | flip | CORRUPT (exit 2): L1 CRC32, L2, L3 174,279 rows, L4, L5 | L4 first damaged chunk 13 of 39, rows 120,001–130,000 | 5.1 s |
 | truncate | CORRUPT (exit 2): L1 EOF at compressed byte 20,000,000, L2, L4 | after row 127,020, partial row of 85 bytes | 2.3 s |
+
+### Scale benchmark and `make demo` (phase 8 part B)
+
+`make bench` (`bench/scale.py`) does the following for 1×, 3× and 5× of `base_rows`:
+- seeds `eguard_bench.transactions`;
+- exports it with the hardened script (signed manifest);
+- measures `eguard verify --manifest` with the L5 drill (`SCRATCH_DSN` set);
+- deletes the export, the manifest and the schema before the next scale.
+
+Before each scale it estimates the export size. If the project would go over the 1.5 GB budget
+(`config/sim.yaml` `bench:`), it stops and says so in the results. 5× fitted: the project was
+951 MB plus an estimated 272 MB.
+
+The 1× export is also fully re-imported, once, into a throwaway database for comparison
+(`gzip -dc | psql`, ON_ERROR_STOP), which is then dropped.
+
+Measured on 2026-10-30 11:21 UTC (`bench/results.md`). Machine: AMD Ryzen 7 7840HS, 16 CPUs, 7.4 GiB RAM,
+WSL2. Versions: PostgreSQL 16.15, pigz 2.8, Python 3.12.3.
+
+| scale | rows | compressed | uncompressed | verify (L1–L5) | compressed MB/s | uncompressed MB/s | peak RSS | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 1× | 300,000 | 49.5 MB | 98.1 MB | 4.7 s | 10.5 | 20.9 | 97.5 MiB | VERIFIED RAL 5 |
+| 3× | 900,000 | 148.6 MB | 294.4 MB | 13.4 s | 11.1 | 22.0 | 97.8 MiB | VERIFIED RAL 5 |
+| 5× | 1,500,000 | 247.7 MB | 491.2 MB | 22.2 s | 11.2 | 22.1 | 98.7 MiB | VERIFIED RAL 5 |
+
+As rows grow 5×:
+- Verify time grows linearly.
+- Peak RSS stays at 97.5–98.7 MiB, because the sketches bound memory (rule 2).
+- Throughput is about 11 MB/s compressed. Pure-Python L3 is the cost.
+
+| full re-import of 1× | wall | DB disk used | rows loaded | verify wall |
+|---|---:|---:|---:|---:|
+| 300,000 rows, 49.5 MB | 1.5 s | 118.6 MB | 300,000 | 4.7 s |
+
+**On this laptop, a full re-import is faster than `eguard verify`: 1.5 s vs 4.7 s.** (A first run measured 1.2 s vs 4.6 s.) ExportGuard's
+advantage here is not speed. It is two things:
+- **Space.** The re-import needed 118.6 MB of database space, 2.4× the compressed file. The L5
+  drill on the same file restored a 2,995-row sample into 1.2 MiB of scratch.
+- **Evidence a re-import does not give.** The F5 and F1 fault files were re-imported the same way:
+
+| export | psql exit | rows loaded / source rows | ExportGuard |
+|---|---:|---:|---|
+| F5 (one amount changed, well-formed dump) | 0 | 65,000 / 65,000 | CORRUPT: `l4_fingerprint` chunk 4 of 7, rows 30,001–40,000 |
+| F1 (exporter killed mid-COPY) | 3: `invalid input syntax for type json` | 0 / 65,000 | CORRUPT: `l2_complete`, a COPY block never closed |
+
+  A re-import loaded F5 without complaint, because it has no record of what the source held.
+  F1 failed to load, but psql's error names a JSON parse failure, not a truncated export.
+
+The 1× re-import was measured on an idle local Docker database. A production table with
+indexes, constraints and a busy tablespace was not measured here.
+
+`make demo` (`scripts/demo.sh`, `set -euo pipefail`) runs each step, times it, and stops at the
+first failure with that step's exit code:
+1. start PostgreSQL;
+2. reset the database (drops `public.transactions`, `eguard_faults`, `eguard_bench` and leftover
+   `eguard_l5_*` schemas);
+3. incident (this seeds the table itself);
+4. v3 hardened export;
+5. faults;
+6. verify-all;
+7. explain;
+8. count the reports;
+9. dashboard.
+
+Measured run (2026-10-30, default scale):
+
+| step | wall |
+|---|---:|
+| start PostgreSQL | 0.6 s |
+| reset database | 0.1 s |
+| incident: seed v1, legacy v1/v2 exports | 15.7 s |
+| hardened export v3 (+ manifest, verify) | 6.2 s |
+| fault gallery F0–F7 | 20.9 s |
+| verify-all + reports (16 HTML, 19 JSON in `data/reports`) | 30.2 s |
+| explain v1→v2 and F0→F7 | 21.2 s |
+| dashboard | 0.0 s (already running, reused) |
+| **total** | **1 m 35.4 s** (target < 5 min) |
+
+![ExportGuard dashboard](docs/img/dashboard.png)
+
+*Screenshot: TBD. No headless renderer is installed. Capture `http://localhost:8501` after
+`make demo` and save it to `docs/img/dashboard.png`.*
 
 ## Documentation
 

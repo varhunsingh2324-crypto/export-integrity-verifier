@@ -53,11 +53,13 @@ def _vmrss_kib(pid: int) -> int | None:
     return None
 
 
-def measure(path: Path) -> dict:
+def measure(path: Path, extra_args: tuple[str, ...] = ()) -> dict:
     samples: list[tuple[float, int]] = []
     with tempfile.TemporaryFile() as out:
         start = time.perf_counter()
-        proc = subprocess.Popen([str(EGUARD), "verify", "--json", str(path)], stdout=out)
+        proc = subprocess.Popen(
+            [str(EGUARD), "verify", "--json", str(path), *extra_args], stdout=out
+        )
         done = threading.Event()
 
         def sample() -> None:
@@ -84,6 +86,19 @@ def measure(path: Path) -> dict:
         "members": fmt["members"],
         "lines": fmt["decompressed_lines"],
         "verdict": report["verdict"],
+        "ral": report.get("ral"),
+        "layers": {lr["layer"]: lr["status"] for lr in report.get("layers", [])},
+        "l5_scratch_bytes": next(
+            (
+                c["evidence"].get("scratch_bytes")
+                for c in report["checks"]
+                if c["name"] == "l5_restore"
+            ),
+            None,
+        ),
+        "l5_sample_n": next(
+            (c["evidence"].get("n") for c in report["checks"] if c["name"] == "l5_sample"), None
+        ),
         "exit": proc.returncode,
         "l1": {c["name"]: c["status"] for c in report["checks"] if c["layer"] == 1},
         "fails": [c["name"] for c in report["checks"] if c["status"] == "FAIL"],

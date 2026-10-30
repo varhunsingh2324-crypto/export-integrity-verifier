@@ -178,7 +178,7 @@ currency char(3), status text, channel text, merchant_code text, remarks text, m
 
 | ID | Fault | How it is produced | Expected result |
 |---|---|---|---|
-| F0 | None (v2 itself) | legacy pipeline | VERIFIED (forensic: SUSPECT→VERIFIED with source counts) |
+| F0 | None (the incident's v2 state) | hardened export (`export_with_manifest.sh`, signed manifest with snapshot counts + compressed sha256); corrected in phase 6A, F2–F6 derive from its bytes | VERIFIED (RAL 5 with a scratch DB for L5) |
 | F1 | Exporter killed mid-stream, gzip finishes cleanly | `timeout` / `pg_terminate_backend` on `pg_dump` inside `pg_dump \| gzip` | **`gzip -t` = OK**, L2 = **CORRUPT**; L4 SKIP (corrected in phase 6: a legacy export has no manifest, so L4 has nothing to reconcile against, and forensic `count(*)` cannot prove loss without a baseline from export time) |
 | F1h | The same kill inside the hardened pipeline | `EXPORT_DUMP_TIMEOUT` on `export_with_manifest.sh`; its `.FAILED` files kept | **`gzip -t` = OK**, L2 + L4 = **CORRUPT** (the manifest records `dump_complete = false`) |
 | F2 | File truncated at rest (disk full, copy interrupted) | `head -c 70%` of the `.gz` | L1 CORRUPT (unexpected EOF) |
@@ -288,7 +288,9 @@ as needed — phases 1–6 are the core, 7–8 are what make it stand out.
 - **Property-based** (`hypothesis`): fingerprint is order-independent; any single-row change changes it.
 - **End-to-end fault matrix**: `tests/test_fault_matrix.py` generates F0–F7 at small scale and asserts
   the exact verdict and the exact layer(s) that fail. This test *is* the demo's truth table.
-- **No-false-positive test**: v1 and v2 must both be VERIFIED — the incident file is healthy.
+- **No-false-positive test**: v1 and v2 (legacy, no manifest) must have **no FAIL** in any layer — the
+  incident file is healthy. They are SUSPECT by design, not VERIFIED: without a manifest L4 is SKIP, and
+  only a fully evidenced export (hardened + manifest + L5) can be VERIFIED (corrected in phase 8).
 - **Benchmark** (not a test): MB/s and peak RSS at 1×, 5×, 10× scale. Each scale is generated,
   measured and deleted before the next; only the numbers are kept (rule 10); compare with a timed full
   re-import (`psql < dump`) once at small scale to quote a honest speed/space ratio.
